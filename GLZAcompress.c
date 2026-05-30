@@ -2954,13 +2954,38 @@ top_main_loop:
       if (next_new_symbol_number + num_candidates > max_rules)
         num_candidates = max_rules - next_new_symbol_number;
       if ((num_candidates != 0) && (candidates[candidates_index[0]].score >= min_score)) {
-        free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+        size_t substitute_heap_bytes = (num_file_symbols >= 1000000) ? 0x1000000 : 0x800000;
+        uint8_t use_substitute_heap = 0;
+        char *substitute_base;
+        if (num_file_symbols >= 1000000) {
+          if (substitute_heap_bytes > substitute_heap_size) {
+            free(substitute_heap_buf);
+            substitute_heap_buf = (uint8_t *)malloc(substitute_heap_bytes);
+            substitute_heap_size = substitute_heap_bytes;
+            if (substitute_heap_buf == 0) {
+              fprintf(stderr, "ERROR - substitute memory allocation failed\n");
+              return(0);
+            }
+          }
+          substitute_base = (char *)substitute_heap_buf;
+          use_substitute_heap = 1;
+        } else {
+          substitute_base = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+        }
+        free_RAM_ptr = substitute_base;
         substitute_data = (uint32_t *)free_RAM_ptr;
         free_RAM_ptr += 0x40000 * sizeof(uint32_t);
         substitute_thread_data.symbol_counts = symbol_counts;
         substitute_thread_data.substitute_data = substitute_data;
         child_ptr_array = (struct match_node **)free_RAM_ptr;
         struct match_node * match_nodes = (struct match_node *)(free_RAM_ptr + sizeof(struct match_node *));
+        uintptr_t match_region_end_limit = (uintptr_t)end_RAM_ptr;
+        if (use_substitute_heap != 0)
+          match_region_end_limit = (uintptr_t)substitute_base + substitute_heap_size;
+        else if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
+          match_region_end_limit = (uintptr_t)nodes;
+        uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
+            / sizeof(struct match_node));
         num_match_nodes = 1;
         max_match_length = 0;
         candidate_num = 0;
@@ -2971,10 +2996,17 @@ top_main_loop:
             num_candidates = candidate_num;
           num_match_nodes += candidates[candidates_index[candidate_num]].num_symbols - 1;
           if ((size_t)match_nodes + num_match_nodes * sizeof(struct match_node) + 4 * max_match_length
-              >= (size_t)end_RAM_ptr)
-            num_candidates = candidate_num - 1;
+              >= match_region_end_limit) {
+            if (candidate_num != 0)
+              num_candidates = candidate_num - 1;
+            else
+              num_candidates = 0;
+            break;
+          }
           candidate_num++;
         }
+        if (num_candidates == 0)
+          goto skip_word_substitution;
 
         match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
         candidate_num = 0;
@@ -2987,7 +3019,17 @@ top_main_loop:
             *(match_string_start_ptr + j) = *(node_string_start_ptr + j);
           candidate_num++;
         }
-        overlap_check_data = (struct overlap_check *)(((size_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
+        overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
+        if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
+          if (overlap_check_heap_buf == 0) {
+            overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
+            if (overlap_check_heap_buf == 0) {
+              fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
+              return(0);
+            }
+          }
+          overlap_check_data = overlap_check_heap_buf;
+        }
         for (i = 1 ; i < 8 ; i++)
           overlap_check_data[i].candidate_bad = &candidate_bad[0];
 
@@ -3012,6 +3054,10 @@ top_main_loop:
               while (best_score_match_ptr <= best_score_last_match_ptr) {
                 symbol = *best_score_match_ptr;
                 if (match_node_ptr->child_ptr == 0) {
+                  if (num_match_nodes >= match_nodes_limit) {
+                    candidate_bad[candidate_num] = 1;
+                    break;
+                  }
                   match_node_ptr->child_ptr = &match_nodes[num_match_nodes++];
                   match_node_ptr = match_node_ptr->child_ptr;
                   init_match_node(match_node_ptr, symbol, 0, candidate_num);
@@ -3022,6 +3068,10 @@ top_main_loop:
                     if (match_node_ptr->child_ptr == 0)
                       candidate_bad[match_node_ptr->score_number] = 1;
                   } else {
+                    if (num_match_nodes >= match_nodes_limit) {
+                      candidate_bad[candidate_num] = 1;
+                      break;
+                    }
                     match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
                     match_node_ptr = &match_nodes[num_match_nodes++];
                     init_match_node(match_node_ptr, symbol, 0, candidate_num);
@@ -3288,6 +3338,8 @@ wmain_symbol_substitution_loop_end2:
 #endif
         } while (num_candidates_processed != num_candidates);  // should go to end here if hit maximum dictionary size
         memset(candidate_bad, 0, num_candidates);
+      skip_word_substitution:
+        ;
       }
       goto top_main_loop;
     }
