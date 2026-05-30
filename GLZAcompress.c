@@ -132,6 +132,7 @@ struct overlap_check {
   uint32_t *stop_matches_symbol_ptr;
   uint32_t *stop_symbol_ptr;
   uint32_t **next_match_ptr_ptr;
+  uint32_t *match_stop_ptr;
   uint32_t num_overlaps;
   uint8_t *candidate_bad;
   struct match_node *match_nodes;
@@ -2096,7 +2097,8 @@ thread_overlap_check_loop_match:
   // no child, so found a match - check for overlaps
   uint32_t node_score_number = match_node_ptr->score_number;
   if ((in_symbol_ptr - match_node_ptr->num_symbols < thread_data_ptr->stop_matches_symbol_ptr)
-      && (candidate_bad[node_score_number] == 0)) {
+      && (candidate_bad[node_score_number] == 0)
+      && (*thread_data_ptr->next_match_ptr_ptr + 2 <= thread_data_ptr->match_stop_ptr)) {
     **thread_data_ptr->next_match_ptr_ptr = node_score_number;
     (*thread_data_ptr->next_match_ptr_ptr)++;
     **thread_data_ptr->next_match_ptr_ptr = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
@@ -2259,7 +2261,8 @@ thread_overlap_check_no_defs_loop_match:
   // no child, so found a match - check for overlaps
   uint32_t node_score_number = match_node_ptr->score_number;
   if ((in_symbol_ptr - match_node_ptr->num_symbols < thread_data_ptr->stop_matches_symbol_ptr)
-      && (candidate_bad[node_score_number] == 0)) {
+      && (candidate_bad[node_score_number] == 0)
+      && (*thread_data_ptr->next_match_ptr_ptr + 2 <= thread_data_ptr->match_stop_ptr)) {
     **thread_data_ptr->next_match_ptr_ptr = node_score_number;
     (*thread_data_ptr->next_match_ptr_ptr)++;
     **thread_data_ptr->next_match_ptr_ptr = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
@@ -3856,6 +3859,9 @@ done_building_tree_tree:
       }
     } else {
       free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+      uintptr_t match_region_end_limit = (uintptr_t)end_RAM_ptr;
+      if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
+        match_region_end_limit = (uintptr_t)nodes;
       struct node_score_data * tmp_candidates = (struct node_score_data *)free_RAM_ptr;
         memcpy(&tmp_candidates[0], &candidates[0], MAX_SCORES_FAST * sizeof(struct node_score_data));
         for (candidate_num = 0 ; candidate_num < MAX_SCORES_FAST ; candidate_num++)
@@ -3926,13 +3932,18 @@ done_building_tree_tree:
       child_ptr_array = (struct match_node **)free_RAM_ptr;
       struct match_node * match_nodes = (struct match_node *)(free_RAM_ptr
           + sizeof(struct match_node *) * next_new_symbol_number);
+      uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
+          / sizeof(struct match_node));
       num_match_nodes = 0;
       max_match_length = 0;
       candidate_num = 0;
       while (candidate_num < num_candidates) {
-        if (free_RAM_ptr + (next_new_symbol_number + num_match_nodes) * sizeof(struct match_node)
-            + max_match_length * sizeof(uint32_t) >= end_RAM_ptr) {
-          num_candidates = candidate_num - 1;
+        if ((uintptr_t)match_nodes + (num_match_nodes + 1) * sizeof(struct match_node)
+            + (uintptr_t)(candidate_num + 1) * max_match_length * sizeof(uint32_t) >= match_region_end_limit) {
+          if (candidate_num != 0)
+            num_candidates = candidate_num - 1;
+          else
+            num_candidates = 0;
           break;
         }
         uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
@@ -3948,6 +3959,10 @@ done_building_tree_tree:
         while (best_score_match_ptr <= best_score_last_match_ptr) {
           symbol = *best_score_match_ptr;
           if (match_node_ptr->child_ptr == 0) {
+            if (num_match_nodes >= match_nodes_limit) {
+              candidate_bad[candidate_num] = 1;
+              break;
+            }
             match_node_ptr->child_ptr = &match_nodes[num_match_nodes++];
             match_node_ptr = match_node_ptr->child_ptr;
             init_match_node(match_node_ptr, symbol, 0, candidate_num);
@@ -3960,6 +3975,10 @@ done_building_tree_tree:
                 break;
               }
             } else {
+              if (num_match_nodes >= match_nodes_limit) {
+                candidate_bad[candidate_num] = 1;
+                break;
+              }
               match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
               match_node_ptr = &match_nodes[num_match_nodes++];
               init_match_node(match_node_ptr, symbol, 0, candidate_num);
@@ -4091,7 +4110,17 @@ done_building_tree_tree:
 
       // save the match strings so they can be added to the end of the data after symbol substitution is done
       match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
-      overlap_check_data = (struct overlap_check *)(((size_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
+      overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
+      if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
+        if (overlap_check_heap_buf == 0) {
+          overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
+          if (overlap_check_heap_buf == 0) {
+            fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
+            return(0);
+          }
+        }
+        overlap_check_data = overlap_check_heap_buf;
+      }
       for (i = 1 ; i < 8 ; i++)
         overlap_check_data[i].candidate_bad = &candidate_bad[0];
 
@@ -4107,11 +4136,26 @@ done_building_tree_tree:
         candidate_num++;
       }
 
-      uint32_t *matches_start_ptr[8], *next_match_start_ptr[8];
-      uint32_t *begin_matches = (uint32_t *)((size_t)overlap_check_data + 8 * sizeof(struct overlap_check));
-      for (i = 0 ; i < 8 ; i++) {
-        next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + i * (((uint32_t *)end_RAM_ptr - begin_matches) >> 3);
-        next_match_ptr[i] = next_match_start_ptr[i];
+      uint32_t *matches_start_ptr[8], *next_match_start_ptr[8], *matches_stop_ptr[8];
+      uintptr_t match_strings_end = ((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7;
+      uint32_t *begin_matches;
+      uint32_t *matches_end_ptr;
+      if (overlap_check_data == overlap_check_heap_buf) {
+        begin_matches = (uint32_t *)match_strings_end;
+        matches_end_ptr = (uint32_t *)match_region_end_limit;
+      } else {
+        begin_matches = (uint32_t *)((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check));
+        matches_end_ptr = (uint32_t *)end_RAM_ptr;
+      }
+      if (begin_matches >= matches_end_ptr)
+        begin_matches = matches_end_ptr;
+      {
+        uint32_t matches_stride = (uint32_t)((matches_end_ptr - begin_matches) >> 3);
+        for (i = 0 ; i < 8 ; i++) {
+          next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + i * matches_stride;
+          matches_stop_ptr[i] = begin_matches + (i + 1) * matches_stride;
+          next_match_ptr[i] = next_match_start_ptr[i];
+        }
       }
 
 #ifdef PRINTON
@@ -4140,6 +4184,7 @@ done_building_tree_tree:
           }
           stop_matches_symbol_ptr[i] = overlap_check_data[i].stop_matches_symbol_ptr;
           overlap_check_data[i].next_match_ptr_ptr = &next_match_ptr[i];
+          overlap_check_data[i].match_stop_ptr = matches_stop_ptr[i];
           overlap_check_data[i].num_overlaps = num_candidates;
           overlap_check_data[i].match_nodes = match_nodes;
           if (overlap_check_data[i].stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH < first_define_index)
@@ -4151,6 +4196,7 @@ done_building_tree_tree:
       }
 
       num_overlaps = num_candidates;
+      overlap_check_data[0].match_stop_ptr = matches_stop_ptr[0];
       for (j = 0 ; j < num_candidates ; j++)
         overlap_check_data[0].next[j] = -1;
 
@@ -4165,7 +4211,7 @@ main_overlap_check_loop_no_match:
         symbol = *in_symbol_ptr++;
         if (in_symbol_ptr >= stop_symbol_ptr)
           goto main_overlap_check_loop_end;
-        if (((int32_t)symbol < 0) || (child_ptr_array[symbol] == 0))
+        if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
           goto main_overlap_check_loop_no_match;
         match_node_ptr = child_ptr_array[symbol];
 main_overlap_check_loop_match:
@@ -4178,7 +4224,7 @@ main_overlap_check_loop_match:
               shifted_symbol >>= 4;
             } else {
               if (match_node_ptr->miss_ptr == 0) {
-                if (((int32_t)symbol < 0) || (child_ptr_array[symbol] == 0))
+                if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
                   goto main_overlap_check_loop_no_match;
                 match_node_ptr = child_ptr_array[symbol];
                 goto main_overlap_check_loop_match;
@@ -4197,7 +4243,8 @@ main_overlap_check_loop_match:
         // no child, so found a match - check for overlaps
         node_score_number = match_node_ptr->score_number;
         if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
-            && (candidate_bad[node_score_number] == 0)) {
+            && (candidate_bad[node_score_number] == 0)
+            && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
           *next_match_ptr[0] = node_score_number;
           next_match_ptr[0]++;
           *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
@@ -4343,7 +4390,8 @@ main_overlap_check_no_defs_loop_match:
         // no child, so found a match - check for overlaps
         node_score_number = match_node_ptr->score_number;
         if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
-            && (candidate_bad[node_score_number] == 0)) {
+            && (candidate_bad[node_score_number] == 0)
+            && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
           *next_match_ptr[0] = node_score_number;
           next_match_ptr[0]++;
           *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
