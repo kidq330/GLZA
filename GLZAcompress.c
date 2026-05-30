@@ -155,8 +155,11 @@ struct symbol_ends_data {
 } *symbol_ends;
 
 struct node * nodes;
+uint32_t nodes_num_limit;
+uint32_t child_ptr_array_size;
 struct node_score_data * candidates;
 struct match_node ** child_ptr_array;
+pthread_mutex_t suffix_tree_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 uint8_t get_UTF8_context(uint32_t symbol) {
   if (symbol < 0x80)
@@ -2749,6 +2752,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   do {
 top_main_loop:
     next_new_symbol_number = num_terminals + num_rules;
+    child_ptr_array_size = next_new_symbol_number;
     d_num_file_symbols = (double)num_file_symbols;
     log_file_symbols = log2(d_num_file_symbols);
     free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
@@ -2811,26 +2815,25 @@ top_main_loop:
     // Set the memory adddress for the suffix tree nodes
     base_nodes_child_node_num = (int32_t *)free_RAM_ptr;
     nodes = (struct node *)((size_t)free_RAM_ptr + sizeof(int32_t) * (size_t)next_new_symbol_number * BASE_NODES_CHILD_ARRAY_SIZE);
-    node_num_limit = (uint32_t)(((uint8_t *)start_symbol_ptr + available_RAM - (uint8_t *)nodes) / sizeof(struct node));
+    {
+      size_t nodes_room = (size_t)end_RAM_ptr - (size_t)nodes;
+      if (nodes >= (struct node *)end_RAM_ptr || nodes_room < sizeof(struct node)) {
+        fprintf(stderr, "ERROR - Insufficient RAM for suffix tree nodes\n");
+        return(0);
+      }
+      node_num_limit = (uint32_t)(nodes_room / sizeof(struct node));
+      nodes_num_limit = node_num_limit;
+    }
 
     if (scan_mode == 0) {
       scan_mode = 1;
 
-      // build the words suffix tree
+      // build the words suffix tree (single-threaded for correctness on ARM)
       base_node_child_num_ptr = &base_nodes_child_node_num[0];
       while (base_node_child_num_ptr <= base_nodes_child_node_num + 0x90)
         *base_node_child_num_ptr++ = 0;
 
-      uint8_t local_write_index[4];
-      for (i = 0 ; i < 4 ; i++) {
-        local_write_index[i] = 0;
-        word_tree_thread_data[i].first_node_num = 1 + i * (node_num_limit >> 3);
-        word_tree_thread_data[i].write_index = 0;
-        word_tree_thread_data[i].read_index = 0;
-        pthread_create(&word_build_tree_threads[i], NULL, word_build_tree_thread, (void *)&word_tree_thread_data[i]);
-      }
-      find_substitutions_thread_data = (struct find_substitutions_thread_data *)(nodes + (node_num_limit >> 1));
-
+      next_node_num = 1;
       in_symbol_ptr = start_symbol_ptr;
       uint8_t word_start[0x80];
       for (i = 0 ; i < 0x80 ; i++)
