@@ -182,6 +182,12 @@ void StartModelFirstChar() {
   uint8_t i = 0xFF;
   do {
     uint8_t j = 0xFF;
+    do {
+      FirstCharData[0][i][j].data.freq = 0;
+      FirstCharData[1][i][j].data.freq = 0;
+      FirstCharData[2][i][j].data.freq = 0;
+      FirstCharData[3][i][j].data.freq = 0;
+    } while (j-- != 0);
     RangeScaleFirstChar[0][i] = 0;
     RangeScaleFirstChar[1][i] = 0;
     RangeScaleFirstChar[2][i] = 0;
@@ -1007,6 +1013,10 @@ void EncodeWordTag(uint8_t Symbol, uint8_t Context) {
 }
 
 void EncodeShortDictionarySymbol(uint16_t BinNum, uint16_t DictionaryBins, uint16_t CodeBins) {
+  if (DictionaryBins == 0)
+    DictionaryBins = 1;
+  if (CodeBins == 0)
+    CodeBins = 1;
   NormalizeEncoder(1 << 12);
   low += BinNum * (range /= DictionaryBins);
   range *= (uint32_t)CodeBins;
@@ -1130,6 +1140,7 @@ void InitEncoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   UTF8Compliant = UTF8_compliant;
   MaxBaseCode = max_base_code;
   MaxInstCode = num_inst_codes - 1;
+  NumBaseSymbols = 0;
   OutBuffer = bufptr;
   OutCharNum = 0;
   low = 0, range = -1;
@@ -1890,10 +1901,12 @@ void InitDecoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   UTF8Compliant = UTF8_compliant;
   MaxBaseCode = max_base_code;
   MaxInstCode = num_inst_codes - 1;
+  NumBaseSymbols = 0;
   InBuffer = inbuf;
   code = 0, range = -1;
   for (low = 4; low != 0; low--)
     code = (code << 8) | InBuffer[InCharNum++];
+  low = 0;
   StartModelSymType(use_mtf, cap_encoded);
   StartModelMtfFirst();
   StartModelMtfPos();

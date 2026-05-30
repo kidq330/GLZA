@@ -2493,6 +2493,17 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   pthread_t build_tree_threads[7], word_build_tree_threads[4], rank_scores_thread1, substitute_thread1;
   pthread_t overlap_check_threads[7], find_substitutions_threads[7];
 
+  start_symbol_ptr = 0;
+  symbol_counts = 0;
+  score_map = 0;
+  atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&substitute_data_read_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&max_symbol_ptr, 0, memory_order_relaxed);
+  atomic_store_explicit(&scan_symbol_ptr, 0, memory_order_relaxed);
+  for (i = 0 ; i < 8 ; i++)
+    next_match_ptr[i] = 0;
 
   if (sizeof(uint32_t *) >= 8)
     max_memory_usage = 0x800000000;

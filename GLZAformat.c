@@ -64,7 +64,7 @@ double calculate_order_1_entropy(uint32_t symbol_counts[0x100], uint32_t order_1
 }
 
 
-uint8_t GLZAformat(int32_t insize, uint8_t * inbuf, int32_t * outsize_ptr, uint8_t ** outbuf, struct param_data * params) {
+uint8_t GLZAformat(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t ** outbuf, struct param_data * params) {
   const uint32_t CHARS_TO_WRITE = 0x40000;
   uint8_t this_char, prev_char, next_char, cap_encoded, cap_lock_disabled, delta_disabled, stride;
   uint8_t *inbuf2, *in_char_ptr, *end_char_ptr, *out_char_ptr;

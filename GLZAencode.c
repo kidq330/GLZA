@@ -860,6 +860,11 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
 
   verbose = cap_encoded = UTF8_compliant = num_symbols_defined = 0;
   first_define_ptr = 0;
+  end_char = 0;
+  prior_symbol = 0;
+  num_transmits = 0;
+  num_grammar_rules = 0;
+  found_first_symbol = 0;
   use_mtf = 2;
   if (params != 0) {
     verbose = params->print_dictionary;
@@ -2074,6 +2079,10 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   do {
     for (j = 1 ; j <= max_code_length ; j++) {
       sym_list_bits[i][j] = 2;
+      if (sym_list_ptrs[i][j] != 0) {
+        free(sym_list_ptrs[i][j]);
+        sym_list_ptrs[i][j] = 0;
+      }
       if (0 == (sym_list_ptrs[i][j] = (uint32_t *)malloc(sizeof(uint32_t) * 4))) {
         fprintf(stderr, "Error - symbol list memory allocation failed\n");
         return(0);
@@ -2192,8 +2201,10 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   if (UTF8_compliant != 0)
     i = 0x90;
   do {
-    for (j = 2 ; j <= max_code_length ; j++)
+    for (j = 1 ; j <= max_code_length ; j++) {
       free(sym_list_ptrs[i][j]);
+      sym_list_ptrs[i][j] = 0;
+    }
   } while (i--);
   free(symbol_array);
   free(sd);
