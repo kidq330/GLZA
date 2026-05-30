@@ -319,6 +319,8 @@ void write_siblings_miss_ptr(struct match_node *match_nodes, struct match_node *
 
 struct node * create_suffix_node(uint32_t suffix_symbol, uint32_t symbol_index,
       uint32_t * next_node_num_ptr) {
+  if (*next_node_num_ptr >= nodes_num_limit)
+    return(0);
   struct node * node_ptr = &nodes[(*next_node_num_ptr)++];
   node_ptr->symbol = suffix_symbol;
   node_ptr->last_match_index = symbol_index;
@@ -333,6 +335,8 @@ struct node * create_suffix_node(uint32_t suffix_symbol, uint32_t symbol_index,
 
 struct node * split_node_for_overlap(struct node * node_ptr, uint32_t split_index, uint32_t in_symbol_index,
     uint32_t * next_node_num_ptr) {
+  if (*next_node_num_ptr >= nodes_num_limit)
+    return(0);
   uint32_t non_overlap_length = split_index - node_ptr->last_match_index;
   struct node * new_node_ptr = &nodes[*next_node_num_ptr];
   new_node_ptr->symbol = *(start_symbol_ptr + split_index);
@@ -363,19 +367,26 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
       return;
     }
     uint32_t symbol_index = *base_node_child_num_ptr + 0x80000000;
-    *base_node_child_num_ptr = *next_node_num_ptr;
-    (void)create_suffix_node(*(start_symbol_ptr + symbol_index), symbol_index, next_node_num_ptr);
+    uint32_t new_node_num = *next_node_num_ptr;
+    if (create_suffix_node(*(start_symbol_ptr + symbol_index), symbol_index, next_node_num_ptr) == 0)
+      return;
+    *base_node_child_num_ptr = (int32_t)new_node_num;
   }
+  if (*base_node_child_num_ptr <= 0 || (uint32_t)*base_node_child_num_ptr >= nodes_num_limit)
+    return;
   struct node * node_ptr = &nodes[*base_node_child_num_ptr];
   if (search_symbol != node_ptr->symbol) {  // follow siblings until match found or end of siblings found
     uint32_t shifted_search_symbol = search_symbol >> 4;
     do {
       int32_t * sibling_node_num_ptr = &node_ptr->sibling_node_num[shifted_search_symbol & 1];
       if (*sibling_node_num_ptr == 0) { // no match so add sibling
-        *sibling_node_num_ptr = *next_node_num_ptr;
-        (void)create_suffix_node(search_symbol, in_symbol_ptr - start_symbol_ptr, next_node_num_ptr);
+        if (create_suffix_node(search_symbol, in_symbol_ptr - start_symbol_ptr, next_node_num_ptr) == 0)
+          return;
+        *sibling_node_num_ptr = (int32_t)(*next_node_num_ptr - 1);
         return;
       }
+      if ((uint32_t)*sibling_node_num_ptr >= nodes_num_limit)
+        return;
       node_ptr = &nodes[*sibling_node_num_ptr];
       shifted_search_symbol = shifted_search_symbol >> 1;
     } while (search_symbol != node_ptr->symbol);
@@ -391,6 +402,8 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
       uint32_t length = 1;
       do {
         if (*(node_symbol_ptr + length) != *(in_symbol_ptr + length)) { // insert node in branch
+          if (*next_node_num_ptr + 1 >= nodes_num_limit)
+            return;
           struct node * new_node_ptr = &nodes[*next_node_num_ptr];
           new_node_ptr->last_match_index = node_ptr->last_match_index + length;
           new_node_ptr->symbol = *(node_symbol_ptr + length);
@@ -403,8 +416,9 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
           node_ptr->child_node_num = (*next_node_num_ptr)++;
           node_ptr->instances++;
           new_node_ptr->sibling_node_num[(*(in_symbol_ptr + length)) & 1] = *next_node_num_ptr;
-          (void)create_suffix_node(*(in_symbol_ptr + length), in_symbol_ptr + length - start_symbol_ptr,
-              next_node_num_ptr);
+          if (create_suffix_node(*(in_symbol_ptr + length), in_symbol_ptr + length - start_symbol_ptr,
+              next_node_num_ptr) == 0)
+            return;
           return;
         }
       } while (length++ != num_extra_symbols);
@@ -414,16 +428,21 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
     if (*(in_symbol_ptr - 1) == 0x20)
       return;
     search_symbol = *in_symbol_ptr;
+    if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit)
+      return;
     node_ptr = &nodes[node_ptr->child_node_num];
     if (search_symbol != node_ptr->symbol) { // follow siblings until match found or end of siblings found
       uint32_t shifted_search_symbol = search_symbol;
       do {
         int32_t * prior_node_num_ptr = &node_ptr->sibling_node_num[shifted_search_symbol & 1];
         if (*prior_node_num_ptr == 0) {
-          *prior_node_num_ptr = *next_node_num_ptr;
-          (void)create_suffix_node(search_symbol, in_symbol_ptr - start_symbol_ptr, next_node_num_ptr);
+          if (create_suffix_node(search_symbol, in_symbol_ptr - start_symbol_ptr, next_node_num_ptr) == 0)
+            return;
+          *prior_node_num_ptr = (int32_t)(*next_node_num_ptr - 1);
           return;
         }
+        if ((uint32_t)*prior_node_num_ptr >= nodes_num_limit)
+          return;
         node_ptr = &nodes[*prior_node_num_ptr];
         shifted_search_symbol >>= 1;
       } while (search_symbol != node_ptr->symbol);
@@ -444,15 +463,21 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
     node_ptr->num_extra_symbols = length - 1;
     node_ptr = create_suffix_node(*(node_symbol_ptr + length), node_symbol_ptr + length - start_symbol_ptr,
         next_node_num_ptr);
+    if (node_ptr == 0)
+      return;
     node_ptr->sibling_node_num[*(in_symbol_ptr + length) & 1] = *next_node_num_ptr;
-    (void)create_suffix_node(*(in_symbol_ptr + length), in_symbol_ptr + length - start_symbol_ptr,
-        next_node_num_ptr);
+    if (create_suffix_node(*(in_symbol_ptr + length), in_symbol_ptr + length - start_symbol_ptr,
+        next_node_num_ptr) == 0)
+      return;
     return;
   }
   node_ptr = create_suffix_node(*(node_symbol_ptr + 1), node_symbol_ptr + 1 - start_symbol_ptr,
       next_node_num_ptr);
+  if (node_ptr == 0)
+    return;
   node_ptr->sibling_node_num[*(in_symbol_ptr + 1) & 1] = *next_node_num_ptr;
-  (void)create_suffix_node(*(in_symbol_ptr + 1), in_symbol_ptr + 1 - start_symbol_ptr, next_node_num_ptr);
+  if (create_suffix_node(*(in_symbol_ptr + 1), in_symbol_ptr + 1 - start_symbol_ptr, next_node_num_ptr) == 0)
+    return;
   return;
 }
 
