@@ -2530,7 +2530,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   struct word_tree_thread_data word_tree_thread_data[4];
   struct rank_scores_thread_data *rank_scores_data_ptr;
   struct score_data *node_data;
-  struct find_substitutions_thread_data *find_substitutions_thread_data;
+  struct find_substitutions_thread_data *find_substitutions_thread_data, *find_substitutions_thread_data_buf;
+  uint8_t *substitute_heap_buf;
+  size_t substitute_heap_size;
+  struct overlap_check *overlap_check_heap_buf;
   struct substitute_thread_data substitute_thread_data;
   struct match_node *match_node_ptr;
   struct overlap_check *overlap_check_data;
@@ -2540,6 +2543,11 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   start_symbol_ptr = 0;
   symbol_counts = 0;
   score_map = 0;
+  find_substitutions_thread_data = 0;
+  find_substitutions_thread_data_buf = 0;
+  substitute_heap_buf = 0;
+  substitute_heap_size = 0;
+  overlap_check_heap_buf = 0;
   atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
   atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
   atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
@@ -3054,7 +3062,17 @@ top_main_loop:
           }
 
           // scan the data following the prefix tree and substitute new symbols on end matches (child is 0)
-          if (num_file_symbols >= 1000000) {
+          if (num_file_symbols >= 100000000) {
+            if (find_substitutions_thread_data_buf == 0) {
+              find_substitutions_thread_data_buf = (struct find_substitutions_thread_data *)malloc(
+                  6 * sizeof(struct find_substitutions_thread_data));
+              if (find_substitutions_thread_data_buf == 0) {
+                fprintf(stderr, "ERROR - find_substitutions memory allocation failed\n");
+                return(0);
+              }
+              memset(find_substitutions_thread_data_buf, 0, 6 * sizeof(struct find_substitutions_thread_data));
+            }
+            find_substitutions_thread_data = find_substitutions_thread_data_buf;
             stop_symbol_ptr = start_symbol_ptr + 64 * (num_file_symbols >> 9);
             find_substitutions_thread_data[0].start_symbol_ptr = stop_symbol_ptr;
             block_ptr = stop_symbol_ptr + 68 * (num_file_symbols >> 9);
@@ -3085,7 +3103,8 @@ top_main_loop:
             stop_symbol_ptr = end_symbol_ptr;
 
           uint32_t extra_match_symbols = 0;
-          uint16_t substitute_index = 0;
+          uint32_t substitute_index = 0;
+          const uint32_t substitute_data_limit = 0x40000;
           in_symbol_ptr = start_symbol_ptr;
           previous_in_symbol_ptr = start_symbol_ptr;
           out_symbol_ptr = start_symbol_ptr;
@@ -3175,7 +3194,7 @@ wmain_symbol_substitution_loop_end2:
           in_symbol_ptr = substitute_thread_data.in_symbol_ptr;
           out_symbol_ptr = substitute_thread_data.out_symbol_ptr;
 
-          if (num_file_symbols >= 1000000) {
+          if (num_file_symbols >= 100000000) {
             for (i = 0 ; i < 6 ; i++) {
               uint32_t local_substitutions_write_index;
               uint32_t substitutions_index = 0;
