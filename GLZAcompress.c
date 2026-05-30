@@ -44,6 +44,7 @@ const uint32_t NUM_PRECALCULATED_NFSMR_LOGS = 0x400;
 const uint32_t NUM_PRECALCULATED_SYMBOL_COSTS = 2000;
 const uint32_t MAX_SCORES = 30000;
 const uint32_t MAX_SCORES_FAST = 0x7FFF;
+const uint32_t NODE_DATA_STACK_DEPTH = MAX_MATCH_LENGTH + 32;
 const float BIG_FLOAT = 1000000000.0;
 
 uint32_t num_file_symbols, num_terminals;
@@ -1897,6 +1898,8 @@ void score_base_node_tree_words(struct node* node_ptr, struct score_data *node_d
           if (profit_per_substitution >= 0.0) {
             float score = repeats * profit_per_substitution - production_cost;
             if (score > min_score) {
+              if (node_ptrs_num >= 0xFFFE)
+                goto score_siblings;
               if ((node_ptrs_num & 0xFFF) == 0)
                 while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
                     >= 0xF000); // wait
@@ -1911,29 +1914,40 @@ void score_base_node_tree_words(struct node* node_ptr, struct score_data *node_d
       }
       string_entropy += symbol_entropy[*(start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols)];
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
-        node_data[level].node_ptr = node_ptr;
-        node_data[level].num_symbols = num_symbols;
-        node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        if (level < NODE_DATA_STACK_DEPTH - 1) {
+          node_data[level].node_ptr = node_ptr;
+          node_data[level].num_symbols = num_symbols;
+          node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        }
       }
       num_symbols += num_extra_symbols + 1;
+      if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit)
+        goto score_siblings;
       node_ptr = &nodes[node_ptr->child_node_num];
     } else {
 score_siblings:
       sib_node_num = node_ptr->sibling_node_num[0];
-      struct node * tnp = &nodes[sib_node_num];
+      if (sib_node_num <= 0 || (uint32_t)sib_node_num >= nodes_num_limit)
+        sib_node_num = 0;
+      struct node * tnp = sib_node_num ? &nodes[sib_node_num] : node_ptr;
       if ((sib_node_num > 0)
           && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
-        tnp = &nodes[node_ptr->sibling_node_num[1]];
-        if ((node_ptr->sibling_node_num[1] > 0) &&
+        if (node_ptr->sibling_node_num[1] > 0 && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit)
+          tnp = &nodes[node_ptr->sibling_node_num[1]];
+        else
+          tnp = node_ptr;
+        if ((node_ptr->sibling_node_num[1] > 0) && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
-          node_data[level].node_ptr = node_ptr;
-          node_data[level].num_symbols = num_symbols;
-          node_data[level++].next_sibling = 1;
+          if (level < NODE_DATA_STACK_DEPTH - 1) {
+            node_data[level].node_ptr = node_ptr;
+            node_data[level].num_symbols = num_symbols;
+            node_data[level++].next_sibling = 1;
+          }
         }
         node_ptr = &nodes[sib_node_num];
       } else {
         sib_node_num = node_ptr->sibling_node_num[1];
-        if (sib_node_num > 0)
+        if (sib_node_num > 0 && (uint32_t)sib_node_num < nodes_num_limit)
           node_ptr = &nodes[sib_node_num];
         else {
           if (level == 0) {
@@ -1944,10 +1958,12 @@ score_siblings:
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0 && level < NODE_DATA_STACK_DEPTH - 1)
               node_data[level++].next_sibling = 1;
-            node_ptr = &nodes[node_ptr->sibling_node_num[0]];
-          } else
+            if (node_ptr->sibling_node_num[0] > 0 && (uint32_t)node_ptr->sibling_node_num[0] < nodes_num_limit)
+              node_ptr = &nodes[node_ptr->sibling_node_num[0]];
+          } else if (node_ptr->sibling_node_num[1] > 0
+              && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit)
             node_ptr = &nodes[node_ptr->sibling_node_num[1]];
         }
       }
@@ -2731,7 +2747,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     return(0);
   }
   if ((0 == (new_symbol_number = (uint32_t *)malloc(4 * max_scores)))
-      || (0 == (node_data = (struct score_data *)malloc(max_scores * sizeof(struct score_data))))
+      || (0 == (node_data = (struct score_data *)malloc(NODE_DATA_STACK_DEPTH * sizeof(struct score_data))))
       || (0 == (candidates_index = (uint16_t *)malloc(2 * max_scores)))
       || (0 == (candidate_bad = (uint8_t *)malloc(max_scores)))
       || ((fast_mode == 0) && (0 == (x_log2_x = (double *)malloc(8 * max_x_log2_x))))) {
