@@ -53,7 +53,7 @@ int32_t *base_nodes_child_node_num;
 int16_t *score_map;
 uint8_t cap_encoded, fast_mode;
 atomic_uint_least16_t rank_scores_write_index, rank_scores_read_index;
-atomic_uint_least16_t substitute_data_write_index, substitute_data_read_index;
+atomic_uint_least32_t substitute_data_write_index, substitute_data_read_index;
 atomic_uintptr_t max_symbol_ptr, scan_symbol_ptr;
 double log_file_symbols, num_file_symbols_p1_x_log_file_symbols_p1, new_rule_cost, *x_log2_x;
 double order_ratio, log2_x[0x4000], nfs_profit[0x400];
@@ -2477,8 +2477,8 @@ thread_symbol_substitution_loop_end2:
 void *substitute_thread(void *arg) {
   struct substitute_thread_data * thread_data_ptr = (struct substitute_thread_data *)arg;
   uint32_t data;
-  uint16_t local_write_index;
-  uint16_t substitute_data_index = 0;
+  uint32_t local_write_index;
+  uint32_t substitute_data_index = 0;
 
   thread_data_ptr->out_symbol_ptr = thread_data_ptr->in_symbol_ptr;
   while (1) {
@@ -3210,9 +3210,13 @@ wmain_symbol_substitution_loop_match_search:
                 goto wmain_symbol_substitution_loop_end;
               }
               // found a match
-              if (((substitute_index + 2) & 0x7FFC) == 0)
-                while ((uint16_t)(substitute_index - atomic_load_explicit(&substitute_data_read_index,
-                    memory_order_acquire)) >= 0x7FFE); // wait
+              if ((substitute_index + 3) >= substitute_data_limit) {
+                fprintf(stderr, "ERROR - substitute_data buffer overflow\n");
+                return(0);
+              }
+              if (((substitute_index + 2) & 0xFFFC) == 0)
+                while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
+                    memory_order_acquire)) >= 0xFFF0); // wait
               if (in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols != 0)
                 substitute_data[substitute_index++] = in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols;
               substitute_data[substitute_index++] = 0x80000000 + match_node_ptr->num_symbols;
@@ -3229,14 +3233,14 @@ wmain_symbol_substitution_loop_match_search:
             goto wmain_symbol_substitution_loop_top;
 
 wmain_symbol_substitution_loop_end:
-          if ((substitute_index & 0x7FFF) == 0)
-            while ((uint16_t)(substitute_index - atomic_load_explicit(&substitute_data_read_index,
-                memory_order_acquire)) >= 0x8000); // wait
+          if ((substitute_index & 0xFFF) == 0)
+            while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
+                memory_order_acquire)) >= 0xFFF0); // wait
           substitute_data[substitute_index++] = stop_symbol_ptr - previous_in_symbol_ptr;
           atomic_store_explicit(&substitute_data_write_index, substitute_index, memory_order_release);
 wmain_symbol_substitution_loop_end2:
-          if ((substitute_index & 0x7FFF) == 0)
-            while (substitute_index != (uint16_t)atomic_load_explicit(&substitute_data_read_index,
+          if ((substitute_index & 0xFFF) == 0)
+            while (substitute_index != atomic_load_explicit(&substitute_data_read_index,
                 memory_order_acquire)); // wait
           substitute_data[substitute_index++] = 0xFFFFFFFF;
           atomic_store_explicit(&substitute_data_write_index, substitute_index, memory_order_release);
