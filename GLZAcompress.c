@@ -89,9 +89,10 @@ struct tree_thread_data {
 
 struct word_tree_thread_data {
   uint32_t first_node_num;
+  uint32_t nodes_limit;
   int32_t start_positions[256];
-  atomic_uint_least8_t write_index;
-  atomic_uint_least8_t read_index;
+  atomic_uint_least16_t write_index;
+  atomic_uint_least16_t read_index;
 };
 
 struct node_score_data {
@@ -700,7 +701,9 @@ void *build_tree_thread(void *arg) {
       do {
         uint32_t symbol = *in_symbol_ptr++;
         if ((symbol >= min_symbol) && (symbol <= max_symbol)) {
+          pthread_mutex_lock(&suffix_tree_mutex);
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
+          pthread_mutex_unlock(&suffix_tree_mutex);
           if (next_node_num >= node_num_limit)
             return(0);
         }
@@ -714,17 +717,20 @@ void *build_tree_thread(void *arg) {
 void *word_build_tree_thread(void *arg) {
   struct word_tree_thread_data * thread_data_ptr = (struct word_tree_thread_data *)arg;
   uint32_t next_node_num = thread_data_ptr->first_node_num;
-  uint8_t local_write_index;
-  uint8_t local_read_index = 0;
+  uint32_t nodes_limit = thread_data_ptr->nodes_limit - 10;
+  uint16_t local_write_index;
+  uint16_t local_read_index = 0;
 
   while (1) {
-    while ((local_write_index = (uint8_t)atomic_load_explicit(&thread_data_ptr->write_index, memory_order_acquire))
+    while ((local_write_index = (uint16_t)atomic_load_explicit(&thread_data_ptr->write_index, memory_order_acquire))
         == local_read_index)
       sched_yield();
     do {
-      if (thread_data_ptr->start_positions[local_read_index] < 0)
+      if (thread_data_ptr->start_positions[local_read_index & 0xFF] < 0)
         return(0);
-      add_word_suffix(start_symbol_ptr + thread_data_ptr->start_positions[local_read_index], &next_node_num);
+      add_word_suffix(start_symbol_ptr + thread_data_ptr->start_positions[local_read_index & 0xFF], &next_node_num);
+      if (next_node_num >= nodes_limit)
+        return(0);
       atomic_store_explicit(&thread_data_ptr->read_index, ++local_read_index, memory_order_relaxed);
     } while (local_read_index != local_write_index);
   }
@@ -2900,24 +2906,13 @@ top_main_loop:
         if (symbol == 0x20) {
           if (((*in_symbol_ptr >= 0x80) && (UTF8_compliant != 0))
               || ((*in_symbol_ptr < 0x80) && (word_start[*in_symbol_ptr] != 0))) {
-            uint8_t thread_num = *in_symbol_ptr & 3;
-            if ((local_write_index[thread_num] & 0x7F) == 0)
-              while ((uint8_t)(local_write_index[thread_num]
-                  - atomic_load_explicit(&word_tree_thread_data[thread_num].read_index, memory_order_acquire))
-                >= 0x80); // wait
-            word_tree_thread_data[thread_num].start_positions[local_write_index[thread_num]++]
-                = in_symbol_ptr - start_symbol_ptr;
-            atomic_store_explicit(&word_tree_thread_data[thread_num].write_index, local_write_index[thread_num],
-                memory_order_release);
+            if (next_node_num < node_num_limit - 10)
+              add_word_suffix(in_symbol_ptr, &next_node_num);
           }
         } else if (symbol == 0xFFFFFFFE) {
           in_symbol_ptr--;
           break; // exit loop on EOF
         }
-      }
-      for (i = 0 ; i < 4 ; i++) {
-        word_tree_thread_data[i].start_positions[local_write_index[i]++] = -1;
-        atomic_store_explicit(&word_tree_thread_data[i].write_index, local_write_index[i], memory_order_release);
       }
 
       if (fast_mode != 0) {
@@ -2931,9 +2926,6 @@ top_main_loop:
           }
         } while (++i < next_new_symbol_number);
       }
-
-      for (i = 0 ; i < 4 ; i++)
-        pthread_join(word_build_tree_threads[i], NULL);
 
       node_ptrs_num = 0;
       rank_scores_write_index = 0;
@@ -4801,6 +4793,9 @@ main_overlap_check_loop_end:
     return(0);
   }
   *outsize_ptr = in_size;
+  free(substitute_heap_buf);
+  free(find_substitutions_thread_data_buf);
+  free(overlap_check_heap_buf);
   free(start_symbol_ptr);
 #ifdef PRINTON
   if (fast_mode != 0)
