@@ -2548,8 +2548,12 @@ void *substitute_thread(void *arg) {
       } else if (data != 0xFFFFFFFF) {
         thread_data_ptr->in_symbol_ptr += (size_t)(data + 0x80000000);
         uint32_t symbol = thread_data_ptr->substitute_data[substitute_data_index++];
-        if (symbol > thread_data_ptr->max_rule_symbol)
+        if (symbol > thread_data_ptr->max_rule_symbol) {
+          fprintf(stderr,
+              "GLZA compress: substitute_thread symbol %u > max_rule_symbol %u\n",
+              (unsigned int)symbol, (unsigned int)thread_data_ptr->max_rule_symbol);
           return(0);
+        }
         *thread_data_ptr->out_symbol_ptr++ = symbol;
         thread_data_ptr->symbol_counts[symbol]++;
       } else
@@ -3000,8 +3004,16 @@ top_main_loop:
       else
         min_score = (float)(5.0 + (log2(d_num_file_symbols + 5000000.0) - log2(5000000.0)));
       num_candidates = rank_scores_data_ptr->num_candidates;
-      if (next_new_symbol_number + num_candidates > max_rules)
-        num_candidates = max_rules - next_new_symbol_number;
+      if (next_new_symbol_number + num_candidates > max_rules) {
+        if (max_rules > next_new_symbol_number)
+          num_candidates = max_rules - next_new_symbol_number;
+        else {
+          fprintf(stderr,
+              "GLZA compress: no room for word candidates (next_new_symbol_number=%u max_rules=%u)\n",
+              (unsigned int)next_new_symbol_number, (unsigned int)max_rules);
+          num_candidates = 0;
+        }
+      }
       if ((num_candidates != 0) && (candidates[candidates_index[0]].score >= min_score)) {
         size_t substitute_heap_bytes = (num_file_symbols >= 1000000) ? 0x1000000 : 0x800000;
         uint8_t use_substitute_heap = 0;
@@ -3209,7 +3221,7 @@ top_main_loop:
           out_symbol_ptr = start_symbol_ptr;
 
           substitute_thread_data.in_symbol_ptr = start_symbol_ptr;
-          substitute_thread_data.max_rule_symbol = next_new_symbol_number + num_candidates - 1;
+          substitute_thread_data.max_rule_symbol = (j > next_new_symbol_number) ? (j - 1) : (next_new_symbol_number - 1);
           substitute_data_write_index = 0;
           substitute_data_read_index = 0;
           pthread_create(&substitute_thread1, NULL, substitute_thread, (void *)&substitute_thread_data);
@@ -3386,6 +3398,13 @@ wmain_symbol_substitution_loop_end2:
           end_symbol_ptr = out_symbol_ptr;
           *end_symbol_ptr = 0xFFFFFFFE;
           num_file_symbols = end_symbol_ptr - start_symbol_ptr;
+          if (j > num_terminals + num_rules) {
+            fprintf(stderr,
+                "GLZA compress: reconciling num_rules %u -> %u after word substitution (j=%u num_terminals=%u)\n",
+                (unsigned int)num_rules, (unsigned int)(j - num_terminals), (unsigned int)j,
+                (unsigned int)num_terminals);
+            num_rules = j - num_terminals;
+          }
 #ifdef PRINTON
           if (fast_mode == 0)
             fprintf(stderr, "Replaced %u of %u words\n", num_candidates_processed, num_candidates);
@@ -3972,8 +3991,12 @@ done_building_tree_tree:
         }
       }
 
-      if (next_new_symbol_number + num_candidates > max_rules)
-        num_candidates = max_rules - next_new_symbol_number;
+      if (next_new_symbol_number + num_candidates > max_rules) {
+        if (max_rules > next_new_symbol_number)
+          num_candidates = max_rules - next_new_symbol_number;
+        else
+          num_candidates = 0;
+      }
 
       // build a prefix tree of the match strings
       child_ptr_array = (struct match_node **)free_RAM_ptr;
@@ -4792,6 +4815,45 @@ main_overlap_check_loop_end:
   else
     *in_char_ptr++ = format;
   in_symbol_ptr = start_symbol_ptr;
+  next_new_symbol_number = num_terminals + num_rules;
+  {
+    uint32_t *validate_ptr = start_symbol_ptr;
+    uint32_t invalid_count = 0;
+    while (validate_ptr < end_symbol_ptr) {
+      uint32_t symbol_value = *validate_ptr++;
+      if (symbol_value == 0xFFFFFFFE)
+        continue;
+      if ((int32_t)symbol_value >= 0) {
+        if (symbol_value >= next_new_symbol_number) {
+          if (invalid_count < 8)
+            fprintf(stderr,
+                "GLZA compress: invalid terminal symbol %u >= next_new_symbol_number %u at stream index %u (pass %u rules %u)\n",
+                (unsigned int)symbol_value, (unsigned int)next_new_symbol_number,
+                (unsigned int)(validate_ptr - 1 - start_symbol_ptr), (unsigned int)scan_cycle,
+                (unsigned int)num_rules);
+          invalid_count++;
+        }
+      } else {
+        uint32_t rule_num = symbol_value - 0x80000000;
+        if (rule_num >= num_rules) {
+          if (invalid_count < 8)
+            fprintf(stderr,
+                "GLZA compress: invalid production marker 0x%08x (rule %u >= num_rules %u) at stream index %u\n",
+                (unsigned int)symbol_value, (unsigned int)rule_num, (unsigned int)num_rules,
+                (unsigned int)(validate_ptr - 1 - start_symbol_ptr));
+          invalid_count++;
+        }
+      }
+    }
+    if (invalid_count > 8)
+      fprintf(stderr, "GLZA compress: %u additional invalid symbols in grammar stream\n",
+          (unsigned int)(invalid_count - 8));
+    if (invalid_count != 0)
+      fprintf(stderr,
+          "GLZA compress: %u invalid symbols in final stream (num_terminals=%u num_rules=%u next_new_symbol_number=%u)\n",
+          (unsigned int)invalid_count, (unsigned int)num_terminals, (unsigned int)num_rules,
+          (unsigned int)next_new_symbol_number);
+  }
   if (UTF8_compliant != 0) {
     while (in_symbol_ptr != end_symbol_ptr) {
       uint32_t symbol_value = *in_symbol_ptr++;
