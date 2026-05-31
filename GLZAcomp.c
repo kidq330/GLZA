@@ -38,6 +38,8 @@ uint8_t GLZAcomp(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t *
   uint8_t * tempbuf;
   size_t tempsize;
 
+  params = GLZA_params_or_default(params);
+
   if (insize == 0) {
     *outsize_ptr = 0;
     return(1);

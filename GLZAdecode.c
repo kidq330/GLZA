@@ -1740,6 +1740,8 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   struct sym_data * sym_data_ptr;
   pthread_t output_thread;
 
+  params = GLZA_params_or_default(params);
+
   fd = fd_out;
   stride = outbuf_index = out_buffers_sent = next_write_buffer = two_threads = 0;
   dictionary_size = (uint32_t)(pow(2.0, 10.0 + 0.08 * (double)inbuf[0]));
