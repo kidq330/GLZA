@@ -304,6 +304,96 @@ static int decode_lookup_ok(uint8_t first_char, uint16_t bin_num, const char *wh
   return(1);
 }
 
+static int decode_lookup_store(uint8_t first_char, uint16_t bin, uint8_t bits, const char *where) {
+  if (!decode_lookup_ok(first_char, bin, where))
+    return(0);
+  lookup_bits[first_char][bin] = bits;
+  return(1);
+}
+
+static uint8_t decode_lookup_load(uint8_t first_char, uint16_t bin_num, const char *where) {
+  if (!decode_lookup_ok(first_char, bin_num, where))
+    return(max_code_length);
+  return(lookup_bits[first_char][bin_num]);
+}
+
+static int decode_append_byte(uint32_t *end_ptr, uint8_t byte, const char *where) {
+  if (!decode_dict_write_ok(*end_ptr, 1, where))
+    return(0);
+  symbol_strings[(*end_ptr)++] = byte;
+  return(1);
+}
+
+static int decode_append_ref(uint32_t *end_ptr, uint32_t src_index, uint32_t length, const char *where) {
+  if (length == 1) {
+    if (!decode_dict_write_ok(*end_ptr, 1, where) || !decode_dict_ref_ok(src_index, 1, where))
+      return(0);
+    symbol_strings[(*end_ptr)++] = symbol_strings[src_index];
+    return(1);
+  }
+  if (!decode_dict_write_ok(*end_ptr, length, where) || !decode_dict_ref_ok(src_index, length, where))
+    return(0);
+  uint8_t *src = &symbol_strings[src_index];
+  uint8_t *end_src = src + length;
+  while (src != end_src)
+    symbol_strings[(*end_ptr)++] = *src++;
+  return(1);
+}
+
+static int decode_append_sym(uint32_t *end_ptr, struct sym_data *sym, uint8_t len1_byte, const char *where) {
+  if (sym == 0) {
+    decode_queue_fail("null sym_data_ptr in dictionary copy");
+    return(0);
+  }
+  if (sym->string_length == 1)
+    return(decode_append_byte(end_ptr, len1_byte, where));
+  return(decode_append_ref(end_ptr, sym->string_index, sym->string_length, where));
+}
+
+static int decode_dict_index_ok(uint8_t first_char, uint8_t code_length, uint32_t index, const char *where) {
+  struct bin_data *bin_info = &bin_data[first_char][code_length];
+  if (index >= bin_info->nsob || index >= bin_info->sym_list_size) {
+    fprintf(stderr,
+        "GLZA decode: dictionary index OOB at %s fc=%u cl=%u index=%u nsob=%u list=%u\n",
+        where, (unsigned int)first_char, (unsigned int)code_length, (unsigned int)index,
+        (unsigned int)bin_info->nsob, (unsigned int)bin_info->sym_list_size);
+    decode_queue_fail("dictionary symbol index out of range");
+    return(0);
+  }
+  return(1);
+}
+
+uint32_t get_dictionary_index(uint16_t bin_num, uint8_t code_length, uint8_t first_char);
+
+static int decode_dict_fetch(uint8_t first_char, uint16_t bin_num, uint8_t *code_length_out, uint32_t *index_out,
+    struct sym_data **sym_out, const char *where) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (bin_num >= sum_nbob[first_char]) {
+    fprintf(stderr,
+        "GLZA decode: DecodeBin out of range at %s fc=%u bin=%u sum_nbob=%u\n",
+        where, (unsigned int)first_char, (unsigned int)bin_num, (unsigned int)sum_nbob[first_char]);
+    decode_queue_fail("DecodeBin out of range");
+    return(0);
+  }
+  uint8_t code_length = decode_lookup_load(first_char, bin_num, where);
+  struct bin_data *bin_info = &bin_data[first_char][code_length];
+  if (bin_info->nsob == 0) {
+    fprintf(stderr,
+        "GLZA decode: empty dictionary bin at %s fc=%u cl=%u bin=%u\n",
+        where, (unsigned int)first_char, (unsigned int)code_length, (unsigned int)bin_num);
+    decode_queue_fail("dictionary bin empty");
+    return(0);
+  }
+  uint32_t index = get_dictionary_index(bin_num, code_length, first_char);
+  if (!decode_dict_index_ok(first_char, code_length, index, where))
+    return(0);
+  *code_length_out = code_length;
+  *index_out = index;
+  *sym_out = &bin_info->symbol_data[index];
+  return(1);
+}
+
 
 struct sym_data2 * dadd_symbol_to_queue(struct sym_data *sym_data_ptr, uint8_t code_length, uint8_t first_char) {
   if (ReadDecoderFailed() != 0)
@@ -1033,20 +1123,13 @@ struct sym_data * decode_new(uint32_t * string_index_ptr) {
         else
           first_char = DecodeFirstCharBinary(prior_end);
         uint16_t bin_num = DecodeBin(sum_nbob[first_char]);
-        uint8_t code_length = lookup_bits[first_char][bin_num];
-        uint32_t index = get_dictionary_index(bin_num, code_length, first_char);
-        sym_data_ptr = &bin_data[first_char][code_length].symbol_data[index];
+        uint8_t code_length;
+        uint32_t index;
+        if (!decode_dict_fetch(first_char, bin_num, &code_length, &index, &sym_data_ptr, "decode_new dict"))
+          return(0);
         prior_end = sym_data_ptr->bytes.ends;
-        if (sym_data_ptr->string_length == 1)
-            symbol_strings[end_string_index++] = first_char;
-        else {
-          uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-          uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-          symbol_strings[end_string_index++] = *symbol_string_ptr++;
-          do {
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-          } while (symbol_string_ptr != end_symbol_string_ptr);
-        }
+        if (!decode_append_sym(&end_string_index, sym_data_ptr, first_char, "decode_new dict copy"))
+          return(0);
         if (sym_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) {
           if (--sym_data_ptr->bytes.remaining == 0)
             dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
@@ -1069,21 +1152,17 @@ struct sym_data * decode_new(uint32_t * string_index_ptr) {
             dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
           }
         }
-      } else if (sym_type == 1)
+      } else if (sym_type == 1) {
         sym_data_ptr = decode_new(&end_string_index);
-      else {
+        if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+          return(0);
+      } else {
         sym_data_ptr = dupdate_queue(DecodeMtfPos(queue_size));
+        if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+          return(0);
         prior_end = sym_data_ptr->bytes.ends;
-        if (sym_data_ptr->string_length == 1)
-          symbol_strings[end_string_index++] = prior_end;
-        else {
-          uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-          uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-          symbol_strings[end_string_index++] = *symbol_string_ptr++;
-          do {
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-          } while (symbol_string_ptr != end_symbol_string_ptr);
-        }
+        if (!decode_append_sym(&end_string_index, sym_data_ptr, prior_end, "decode_new mtf copy"))
+          return(0);
       }
     } while (--symbols_in_definition != 0);
 
@@ -1139,6 +1218,8 @@ struct sym_data * decode_new(uint32_t * string_index_ptr) {
       sym_data_ptr = (struct sym_data *)dadd_symbol_to_queue((struct sym_data *)&temp_sym_data,
           temp_sym_data.code_length, temp_sym_data.starts);
   }
+  if (ReadDecoderFailed() != 0)
+    return(0);
   *string_index_ptr = end_string_index;
   return(sym_data_ptr);
 }
@@ -1276,21 +1357,14 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
           else
             first_char = 0x20;
           uint16_t bin_num = DecodeBin(sum_nbob[first_char]);
-          uint8_t code_length = lookup_bits[first_char][bin_num];
-          uint32_t index = get_dictionary_index(bin_num, code_length, first_char);
-          sym_data_ptr = &bin_data[first_char][code_length].symbol_data[index];
+          uint8_t code_length;
+          uint32_t index;
+          if (!decode_dict_fetch(first_char, bin_num, &code_length, &index, &sym_data_ptr, "decode_new_cap dict"))
+            return(0);
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
-          if (sym_data_ptr->string_length == 1)
-            symbol_strings[end_string_index++] = first_char;
-          else {
-            uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-            uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            do {
-              symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            } while (symbol_string_ptr != end_symbol_string_ptr);
-          }
+          if (!decode_append_sym(&end_string_index, sym_data_ptr, first_char, "decode_new_cap dict copy"))
+            return(0);
           if (sym_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) {
             if (--sym_data_ptr->bytes.remaining == 0)
               dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
@@ -1315,9 +1389,11 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
               dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
             }
           }
-        } else if (sym_type == 1)
+        } else if (sym_type == 1) {
           sym_data_ptr = decode_new_cap_encoded(&end_string_index);
-        else {
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            return(0);
+        } else {
           uint8_t mtf_first;
           if (prior_end != 0xA)
             mtf_first = DecodeMtfFirst((prior_type & 0x30) == 0x20, queue_size_other, queue_size_space, queue_size_az);
@@ -1329,45 +1405,27 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
             sym_data_ptr = dupdate_space_queue(DecodeMtfPosSpace(queue_size_space));
           else
             sym_data_ptr = dupdate_az_queue(DecodeMtfPosAz(queue_size_az));
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            return(0);
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
-          if (sym_data_ptr->string_length == 1) {
-            if (!decode_dict_write_ok(end_string_index, 1, "mtf copy single")
-                || !decode_dict_ref_ok(sym_data_ptr->string_index, 1, "mtf copy single src"))
-              return(0);
-            symbol_strings[end_string_index++] = symbol_strings[sym_data_ptr->string_index];
-          } else {
-            if (!decode_dict_write_ok(end_string_index, sym_data_ptr->string_length, "mtf copy multi")
-                || !decode_dict_ref_ok(sym_data_ptr->string_index, sym_data_ptr->string_length, "mtf copy multi src"))
-              return(0);
-            uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-            uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            do {
-              symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            } while (symbol_string_ptr != end_symbol_string_ptr);
-          }
+          if (!decode_append_ref(&end_string_index, sym_data_ptr->string_index, sym_data_ptr->string_length,
+              "decode_new_cap mtf copy"))
+            return(0);
         }
       } else { // prior_is_cap
         uint8_t context = 0x30 + (prior_type & 3);
         if ((sym_type = DecodeSymType(3, context, 'C', queue_size_az)) == 0) {
           first_char = DecodeFirstChar(0, 'C');
           uint16_t bin_num = DecodeBin(sum_nbob[first_char]);
-          uint8_t code_length = lookup_bits[first_char][bin_num];
-          uint32_t index = get_dictionary_index(bin_num, code_length, first_char);
-          sym_data_ptr = &bin_data[first_char][code_length].symbol_data[index];
+          uint8_t code_length;
+          uint32_t index;
+          if (!decode_dict_fetch(first_char, bin_num, &code_length, &index, &sym_data_ptr, "decode_new_cap cap dict"))
+            return(0);
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
-          if (sym_data_ptr->string_length == 1)
-            symbol_strings[end_string_index++] = first_char;
-          else {
-            uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-            uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            do {
-              symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            } while (symbol_string_ptr != end_symbol_string_ptr);
-          }
+          if (!decode_append_sym(&end_string_index, sym_data_ptr, first_char, "decode_new_cap cap dict copy"))
+            return(0);
           if (sym_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) {
             if (--sym_data_ptr->bytes.remaining == 0)
               dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
@@ -1390,22 +1448,18 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
               dremove_dictionary_symbol(&bin_data[first_char][code_length], index);
             }
           }
-        } else if (sym_type == 1)
+        } else if (sym_type == 1) {
           sym_data_ptr = decode_new_cap_encoded(&end_string_index);
-        else {
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            return(0);
+        } else {
           sym_data_ptr = dupdate_az_queue(DecodeMtfPosAz(queue_size_az));
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            return(0);
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
-          if (sym_data_ptr->string_length == 1)
-            symbol_strings[end_string_index++] = prior_end;
-          else {
-            uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
-            uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
-            symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            do {
-              symbol_strings[end_string_index++] = *symbol_string_ptr++;
-            } while (symbol_string_ptr != end_symbol_string_ptr);
-          }
+          if (!decode_append_sym(&end_string_index, sym_data_ptr, prior_end, "decode_new_cap cap mtf copy"))
+            return(0);
         }
       }
     } while (--symbols_in_definition != 0);
@@ -1490,6 +1544,8 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
           temp_sym_data.code_length, temp_sym_data.starts);
   }
   prior_type = temp_sym_data.bytes.type;
+  if (ReadDecoderFailed() != 0)
+    return(0);
   *string_index_ptr = end_string_index;
   return(sym_data_ptr);
 }
@@ -1984,11 +2040,8 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   // main decoding loop
   if (cap_encoded != 0) {
     sym_data_ptr = decode_new_cap_encoded(&new_string_index);
-    if (sym_data_ptr == 0 || ReadDecoderFailed() != 0) {
-      free(symbol_strings);
-      *outsize_ptr = 0;
-      return(0);
-    }
+    if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+      goto decode_failed_early;
     *symbol_buffer_write_ptr++ = *(uint64_t *)&sym_data_ptr->string_index;
     while (1) {
       if (symbol_buffer_write_ptr == symbol_buffer_end_write_ptr)
@@ -2000,10 +2053,12 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
           if (prior_end != 0xA)
             first_char = DecodeFirstChar(prior_type >> 4, prior_end);
           uint16_t bin_num = DecodeBin(sum_nbob[first_char]);
-          uint8_t code_length = lookup_bits[first_char][bin_num];
+          uint8_t code_length = decode_lookup_load(first_char, bin_num, "main dict");
           if (bin_data[first_char][code_length].nsob == 0)
             break; // EOF
           uint32_t index = get_dictionary_index(bin_num, code_length, first_char);
+          if (!decode_dict_index_ok(first_char, code_length, index, "main dict"))
+            goto decode_failed_early;
           sym_data_ptr = &bin_data[first_char][code_length].symbol_data[index];
           *symbol_buffer_write_ptr++ = *(uint64_t *)&sym_data_ptr->string_index;
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
@@ -2034,6 +2089,8 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
           }
         } else if (sym_type == 1) {
           sym_data_ptr = decode_new_cap_encoded(&new_string_index);
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            goto decode_failed_early;
           *symbol_buffer_write_ptr++ = *(uint64_t *)&sym_data_ptr->string_index;
         } else {
           uint8_t mtf_first;
@@ -2047,6 +2104,8 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
             sym_data_ptr = dupdate_space_queue(DecodeMtfPosSpace(queue_size_space));
           else
             sym_data_ptr = dupdate_az_queue(DecodeMtfPosAz(queue_size_az));
+          if (sym_data_ptr == 0 || ReadDecoderFailed() != 0)
+            goto decode_failed_early;
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
           *symbol_buffer_write_ptr++ = *(uint64_t *)&sym_data_ptr->string_index;
@@ -2153,6 +2212,7 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   *(uint32_t *)symbol_buffer_write_ptr = MAX_U32_VALUE;
   if (two_threads != 0)
     atomic_store_explicit(&done_parsing, 1, memory_order_release);
+decode_failed_early:
   i = 0xFF;
   if (UTF8_compliant != 0)
     i = 0x90;
