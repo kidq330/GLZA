@@ -46,11 +46,31 @@ struct first_char_data {
 struct first_char_data FirstCharData[4][0x100][0x100];
 uint8_t NumBaseSymbols = 0;
 
-static void clamp_mtf_pos(uint8_t *position_ptr, uint16_t *queue_size_ptr) {
-  if (*queue_size_ptr > 0xFF)
-    *queue_size_ptr = 0xFF;
-  if (*queue_size_ptr != 0 && *position_ptr >= *queue_size_ptr)
-    *position_ptr = (uint8_t)(*queue_size_ptr - 1);
+static void encoder_fail(const char *reason) {
+  if (EncoderFailed == 0) {
+    fprintf(stderr,
+        "GLZA encode: %s (OutCharNum=%u OutBufferSize=%zu low=0x%08x range=0x%08x)\n",
+        reason, (unsigned int)OutCharNum, OutBufferSize, low, range);
+    EncoderFailed = 1;
+  }
+}
+
+static int check_mtf_pos(const char *where, uint8_t position, uint16_t queue_size) {
+  if (queue_size > 0xFF) {
+    fprintf(stderr,
+        "GLZA encode: MTF queue size %u exceeds FreqMtfPos table limit 255 in %s (position=%u)\n",
+        (unsigned int)queue_size, where, (unsigned int)position);
+    EncoderFailed = 1;
+    return 0;
+  }
+  if (queue_size != 0 && position >= queue_size) {
+    fprintf(stderr,
+        "GLZA encode: MTF position %u >= queue size %u in %s\n",
+        (unsigned int)position, (unsigned int)queue_size, where);
+    EncoderFailed = 1;
+    return 0;
+  }
+  return 1;
 }
 
 uint32_t ReadLow() {return(low);}
@@ -475,7 +495,7 @@ void WriteOutBuffer(uint8_t value) {
   if (EncoderFailed != 0)
     return;
   if (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize) {
-    EncoderFailed = 1;
+    encoder_fail("output buffer overflow in WriteOutBuffer");
     return;
   }
   OutBuffer[OutCharNum++] = value;
@@ -489,13 +509,21 @@ uint8_t ReadEncoderFailed() {
   return(EncoderFailed);
 }
 
+void SetEncoderFailed(const char *reason) {
+  encoder_fail(reason);
+}
+
 void NormalizeEncoder(uint32_t bot) {
   uint32_t normalize_steps = 0;
   while ((low ^ (low + range)) < TOP || (range < bot && ((range = -low & (bot - 1)), 1))) {
     if (EncoderFailed != 0)
       return;
-    if (++normalize_steps > 64 || (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize)) {
-      EncoderFailed = 1;
+    if (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize) {
+      encoder_fail("output buffer overflow in NormalizeEncoder");
+      return;
+    }
+    if (++normalize_steps > 64) {
+      encoder_fail("arithmetic encoder normalization exceeded 64 steps (corrupt low/range?)");
       return;
     }
     OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
@@ -680,14 +708,20 @@ void EncodeMtfFirst(uint8_t Context, uint8_t First, uint16_t QueueSizeOther, uin
 }
 
 void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
-  clamp_mtf_pos(&position, &QueueSize);
+  if (!check_mtf_pos("EncodeMtfPos", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
-      if (last_queue_size_other >= 0xFF)
-        break;
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -738,14 +772,20 @@ void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
 
 
 void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
-  clamp_mtf_pos(&position, &QueueSize);
+  if (!check_mtf_pos("EncodeMtfPosAz", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
     do {
-      if (last_queue_size_az >= 0xFF)
-        break;
+      if (last_queue_size_az >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF az queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_az);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_az -= FreqMtfPos[2][last_queue_size_az++];
       if (last_queue_size_az > rescale_queue_size_az) {
         rescale_queue_size_az++;
@@ -794,14 +834,20 @@ void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
-  clamp_mtf_pos(&position, &QueueSize);
+  if (!check_mtf_pos("EncodeMtfPosSpace", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
     do {
-      if (last_queue_size_space >= 0xFF)
-        break;
+      if (last_queue_size_space >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF space queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_space);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_space -= FreqMtfPos[1][last_queue_size_space++];
       if (last_queue_size_space > rescale_queue_size_space) {
         rescale_queue_size_space++;
@@ -850,14 +896,20 @@ void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosOther(uint8_t position, uint16_t QueueSize) {
-  clamp_mtf_pos(&position, &QueueSize);
+  if (!check_mtf_pos("EncodeMtfPosOther", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
-      if (last_queue_size_other >= 0xFF)
-        break;
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1213,7 +1265,7 @@ void FinishEncoder() {
   if (EncoderFailed != 0)
     return;
   if (OutBufferSize != 0 && OutCharNum + 4 > OutBufferSize) {
-    EncoderFailed = 1;
+    encoder_fail("output buffer overflow in FinishEncoder");
     return;
   }
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
