@@ -513,6 +513,15 @@ void SetEncoderFailed(const char *reason) {
   encoder_fail(reason);
 }
 
+void ResetCodecGlobals(void) {
+  InCharNum = 0;
+  OutCharNum = 0;
+  InBuffer = 0;
+  OutBuffer = 0;
+  OutBufferSize = 0;
+  EncoderFailed = 0;
+}
+
 void NormalizeEncoder(uint32_t bot) {
   uint32_t normalize_steps = 0;
   while ((low ^ (low + range)) < TOP || (range < bot && ((range = -low & (bot - 1)), 1))) {

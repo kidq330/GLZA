@@ -2376,5 +2376,6 @@ encode_cleanup:
   } else
     memcpy(outbuf, enc_buf, *outsize_ptr);
   free(enc_buf);
+  ResetCodecGlobals();
   return(1);
 }

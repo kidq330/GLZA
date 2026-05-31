@@ -1741,6 +1741,7 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   pthread_t output_thread;
 
   params = GLZA_params_or_default(params);
+  ResetCodecGlobals();
 
   fd = fd_out;
   stride = outbuf_index = out_buffers_sent = next_write_buffer = two_threads = 0;
