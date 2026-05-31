@@ -359,12 +359,14 @@ struct node * split_node_for_overlap(struct node * node_ptr, uint32_t split_inde
 
 
 void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
-  uint32_t search_symbol = *in_symbol_ptr;
   int32_t * base_node_child_num_ptr;
-  if (in_symbol_ptr >= end_symbol_ptr || (int32_t)*in_symbol_ptr < 0)
+  if (in_symbol_ptr >= end_symbol_ptr)
     return;
   uint32_t stream_len = (uint32_t)(end_symbol_ptr - start_symbol_ptr);
   if ((uint32_t)(in_symbol_ptr - start_symbol_ptr) >= stream_len)
+    return;
+  uint32_t search_symbol = *in_symbol_ptr;
+  if ((int32_t)search_symbol < 0)
     return;
   if (search_symbol < 0x80)
     base_node_child_num_ptr = &base_nodes_child_node_num[search_symbol];
@@ -376,6 +378,8 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
       return;
     }
     uint32_t symbol_index = *base_node_child_num_ptr + 0x80000000;
+    if (symbol_index >= stream_len)
+      return;
     uint32_t new_node_num = *next_node_num_ptr;
     if (create_suffix_node(*(start_symbol_ptr + symbol_index), symbol_index, next_node_num_ptr) == 0)
       return;
@@ -417,6 +421,8 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
       do {
         if (in_symbol_ptr + length > max_word_ptr)
           return;
+        if (node_ptr->last_match_index + length >= stream_len)
+          return;
         if (*(node_symbol_ptr + length) != *(in_symbol_ptr + length)) { // insert node in branch
           if (*next_node_num_ptr + 1 >= nodes_num_limit)
             return;
@@ -444,6 +450,8 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
     if (in_symbol_ptr > max_word_ptr)
       return;
     if (*(in_symbol_ptr - 1) == 0x20)
+      return;
+    if (in_symbol_ptr >= end_symbol_ptr)
       return;
     search_symbol = *in_symbol_ptr;
     if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit)
@@ -479,9 +487,12 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
       && (in_symbol_ptr < max_word_ptr)) {
     uint32_t length = 2;
     while ((in_symbol_ptr + length <= max_word_ptr)
+        && (node_ptr->last_match_index + length < stream_len)
         && (*(node_symbol_ptr + length) == *(in_symbol_ptr + length))
         && (*(in_symbol_ptr + length - 1) != 0x20))
       length++;
+    if (node_ptr->last_match_index + length >= stream_len)
+      return;
     node_ptr->num_extra_symbols = length - 1;
     node_ptr = create_suffix_node(*(node_symbol_ptr + length), node_symbol_ptr + length - start_symbol_ptr,
         next_node_num_ptr);
@@ -1794,45 +1805,49 @@ void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_data *nod
         }
       } else {
         uint32_t * symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
-        uint32_t * end_symbol_ptr = symbol_ptr + num_extra_symbols;
-        string_entropy += symbol_entropy[*symbol_ptr++];
-        while (symbol_ptr < end_symbol_ptr)
+        uint32_t * node_string_end_ptr = symbol_ptr + num_extra_symbols;
+        if (node_string_end_ptr < end_symbol_ptr) {
           string_entropy += symbol_entropy[*symbol_ptr++];
+          while (symbol_ptr < node_string_end_ptr)
+            string_entropy += symbol_entropy[*symbol_ptr++];
 
-        if ((*symbol_ptr == 0x20) && (*(symbol_ptr - 1) != 0x20)) {
-          // calculate score
-          if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
-            profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
-          else
-            profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
-          bits_saved = repeats * profit_per_substitution - production_cost;
-          if (bits_saved > min_score) {
-            float profit_ratio = profit_per_substitution / (string_entropy + symbol_entropy[0x20]);
-            score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio) + 1.125;
-            if (score > min_score)
-              send_score = 1;
-          }
-        }
+          if (symbol_ptr < end_symbol_ptr) {
+            if ((*symbol_ptr == 0x20) && (*(symbol_ptr - 1) != 0x20)) {
+              // calculate score
+              if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
+                profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
+              else
+                profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
+              bits_saved = repeats * profit_per_substitution - production_cost;
+              if (bits_saved > min_score) {
+                float profit_ratio = profit_per_substitution / (string_entropy + symbol_entropy[0x20]);
+                score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio) + 1.125;
+                if (score > min_score)
+                  send_score = 1;
+              }
+            }
 
-        string_entropy += symbol_entropy[*symbol_ptr];
-        // calculate score
-        if (send_score < 0) {
-          if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
-            profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
-          else
-            profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
-          bits_saved = repeats * profit_per_substitution - production_cost;
-          if (bits_saved > min_score) {
-            float profit_ratio = profit_per_substitution / string_entropy;
-            score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio);
-            if (*symbol_ptr == 0x20)
-              score -= 0.25;
-            else if (((*symbol_ptr) & 0xF2) != 0x42)
-              score += 1.125;
-            else
-              score += 2.125;
-            if (score > min_score)
-              send_score = 0;
+            string_entropy += symbol_entropy[*symbol_ptr];
+            // calculate score
+            if (send_score < 0) {
+              if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
+                profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
+              else
+                profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
+              bits_saved = repeats * profit_per_substitution - production_cost;
+              if (bits_saved > min_score) {
+                float profit_ratio = profit_per_substitution / string_entropy;
+                score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio);
+                if (*symbol_ptr == 0x20)
+                  score -= 0.25;
+                else if (((*symbol_ptr) & 0xF2) != 0x42)
+                  score += 1.125;
+                else
+                  score += 2.125;
+                if (score > min_score)
+                  send_score = 0;
+              }
+            }
           }
         }
       }
@@ -1902,17 +1917,28 @@ void score_base_node_tree_words(struct node* node_ptr, struct score_data *node_d
   uint16_t level = 0;
   uint16_t node_ptrs_num = *node_ptrs_num_ptr;
   float string_entropy = symbol_entropy[0x20];
+  uint32_t stream_len = (uint32_t)(end_symbol_ptr - start_symbol_ptr);
 
   while (1) {
     uint32_t node_instances = node_ptr->instances;
     node_data[level].string_entropy = string_entropy;
     if (node_instances >= 2) {
       uint32_t num_extra_symbols = 0;
-      while (num_extra_symbols != node_ptr->num_extra_symbols)
-        string_entropy += symbol_entropy[*(start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols++)];
-      if (*(start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols) == 0x20) {
+      uint32_t lmi = node_ptr->last_match_index;
+      if (lmi >= stream_len)
+        goto score_siblings;
+      while (num_extra_symbols != node_ptr->num_extra_symbols) {
+        if (lmi + num_extra_symbols >= stream_len)
+          goto score_siblings;
+        string_entropy += symbol_entropy[*(start_symbol_ptr + lmi + num_extra_symbols++)];
+      }
+      if (lmi + num_extra_symbols >= stream_len)
+        goto score_siblings;
+      if (*(start_symbol_ptr + lmi + num_extra_symbols) == 0x20) {
         // calculate score
-        uint32_t last_symbol = *(start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols - 1);
+        if (num_extra_symbols == 0)
+          goto score_siblings;
+        uint32_t last_symbol = *(start_symbol_ptr + lmi + num_extra_symbols - 1);
         if (((last_symbol >= (uint32_t)'a') && (last_symbol <= (uint32_t)'z'))
             || ((last_symbol >= (uint32_t)'0') && (last_symbol <= (uint32_t)'9')) || (last_symbol >= 0x80)) {
           float repeats = (float)(node_instances - 1);
@@ -1938,7 +1964,9 @@ void score_base_node_tree_words(struct node* node_ptr, struct score_data *node_d
         }
         goto score_siblings;
       }
-      string_entropy += symbol_entropy[*(start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols)];
+      if (lmi + num_extra_symbols >= stream_len)
+        goto score_siblings;
+      string_entropy += symbol_entropy[*(start_symbol_ptr + lmi + num_extra_symbols)];
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
         if (level < NODE_DATA_STACK_DEPTH - 1) {
           node_data[level].node_ptr = node_ptr;
@@ -2925,6 +2953,8 @@ top_main_loop:
         word_start[i] = 1;
       word_start['$'] = 1;
       while (1) {
+        if (in_symbol_ptr >= end_symbol_ptr)
+          break;
         symbol = *in_symbol_ptr++;
         if (symbol == 0x20) {
           if (in_symbol_ptr < end_symbol_ptr && (int32_t)*in_symbol_ptr >= 0
