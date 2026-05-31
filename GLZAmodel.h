@@ -31,6 +31,8 @@ void WriteOutBuffer(uint8_t value);
 void SetOutBufferCapacity(size_t size);
 uint8_t ReadEncoderFailed();
 void SetEncoderFailed(const char *reason);
+uint8_t ReadDecoderFailed();
+void SetDecoderFailed(const char *reason);
 void ResetCodecGlobals();
 void EncodeDictTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize);
 void EncodeDictType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16_t QueueSize);

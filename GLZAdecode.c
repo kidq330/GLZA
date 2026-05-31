@@ -237,7 +237,82 @@ void dremove_dictionary_symbol(struct bin_data * bin_info, uint32_t index) {
 }
 
 
+static void decode_queue_fail(const char *reason) {
+  SetDecoderFailed(reason);
+}
+
+static void decode_queue_subcount_inc(uint16_t *subcount, const char *which) {
+  if (*subcount >= 0xFF) {
+    fprintf(stderr,
+        "GLZA decode: %s queue overflow (count=%u total=%u az=%u space=%u other=%u)\n",
+        which, (unsigned int)*subcount, (unsigned int)queue_size, (unsigned int)queue_size_az,
+        (unsigned int)queue_size_space, (unsigned int)queue_size_other);
+    decode_queue_fail("MTF sub-queue overflow");
+    return;
+  }
+  (*subcount)++;
+}
+
+static void decode_queue_subcount_dec(uint16_t *subcount, const char *which) {
+  if (*subcount == 0) {
+    fprintf(stderr,
+        "GLZA decode: %s queue underflow (total=%u az=%u space=%u other=%u)\n",
+        which, (unsigned int)queue_size, (unsigned int)queue_size_az, (unsigned int)queue_size_space,
+        (unsigned int)queue_size_other);
+    decode_queue_fail("MTF sub-queue underflow");
+    return;
+  }
+  (*subcount)--;
+}
+
+static int decode_dict_write_ok(uint32_t end_index, uint32_t add_bytes, const char *where) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (end_index > dictionary_size || add_bytes > dictionary_size - end_index) {
+    fprintf(stderr,
+        "GLZA decode: dictionary write overflow at %s end=%u add=%u cap=%u\n",
+        where, (unsigned int)end_index, (unsigned int)add_bytes, (unsigned int)dictionary_size);
+    decode_queue_fail("dictionary write overflow");
+    return(0);
+  }
+  return(1);
+}
+
+static int decode_dict_ref_ok(uint32_t index, uint32_t length, const char *where) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (length == 0 || index >= dictionary_size || length > dictionary_size - index) {
+    fprintf(stderr,
+        "GLZA decode: dictionary ref invalid at %s index=%u length=%u cap=%u\n",
+        where, (unsigned int)index, (unsigned int)length, (unsigned int)dictionary_size);
+    decode_queue_fail("dictionary ref invalid");
+    return(0);
+  }
+  return(1);
+}
+
+static int decode_lookup_ok(uint8_t first_char, uint16_t bin_num, const char *where) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (bin_num >= 0x1000) {
+    fprintf(stderr,
+        "GLZA decode: lookup_bits OOB at %s first_char=%u bin=%u\n",
+        where, (unsigned int)first_char, (unsigned int)bin_num);
+    decode_queue_fail("lookup_bits index out of range");
+    return(0);
+  }
+  return(1);
+}
+
+
 struct sym_data2 * dadd_symbol_to_queue(struct sym_data *sym_data_ptr, uint8_t code_length, uint8_t first_char) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (queue_size >= 0x100) {
+    fprintf(stderr, "GLZA decode: unified MTF queue full (256 entries)\n");
+    decode_queue_fail("MTF queue full");
+    return(0);
+  }
   uint8_t queue_data_index = queue_data_free_list[queue_size++];
   queue[(uint8_t)--queue_offset] = queue_data_index;
   sym_data_ptr->bytes.type |= 8;
@@ -253,18 +328,27 @@ struct sym_data2 * dadd_symbol_to_queue(struct sym_data *sym_data_ptr, uint8_t c
 
 struct sym_data2 * dadd_symbol_to_queue_cap_encoded(struct sym_data *sym_data_ptr, uint8_t code_length,
     uint8_t first_char) {
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (queue_size >= 0x100) {
+    fprintf(stderr, "GLZA decode: unified MTF queue full (256 entries)\n");
+    decode_queue_fail("MTF queue full");
+    return(0);
+  }
   uint8_t queue_data_index = queue_data_free_list[queue_size];
   queue_size++;
   if ((sym_data_ptr->bytes.type & 1) != 0) {
     queue_az[(uint8_t)--queue_offset_az] = queue_data_index;
-    queue_size_az++;
+    decode_queue_subcount_inc(&queue_size_az, "az");
   } else if (first_char == 0x20) {
     queue_space[(uint8_t)--queue_offset_space] = queue_data_index;
-    queue_size_space++;
+    decode_queue_subcount_inc(&queue_size_space, "space");
   } else {
     queue_other[(uint8_t)--queue_offset_other] = queue_data_index;
-    queue_size_other++;
+    decode_queue_subcount_inc(&queue_size_other, "other");
   }
+  if (ReadDecoderFailed() != 0)
+    return(0);
   sym_data_ptr->bytes.type |= 8;
   struct sym_data2 * queue_data_ptr = &queue_data[queue_data_index];
   queue_data_ptr->string_index = sym_data_ptr->string_index;
@@ -344,11 +428,20 @@ struct sym_data * dupdate_queue(uint8_t queue_position) {
 
 struct sym_data * dupdate_az_queue(uint8_t queue_position) {
   struct sym_data2 * queue_data_ptr;
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (queue_position >= queue_size_az) {
+    fprintf(stderr,
+        "GLZA decode: az queue position %u out of range (queue_size_az=%u)\n",
+        (unsigned int)queue_position, (unsigned int)queue_size_az);
+    decode_queue_fail("az MTF queue position out of range");
+    return(0);
+  }
   uint8_t queue_data_index = queue_az[(uint8_t)(queue_position + queue_offset_az)];
   queue_data_ptr = &queue_data[queue_data_index];
   if ((queue_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) && (--queue_data_ptr->bytes.remaining == 0)) {
     queue_size--;
-    queue_size_az--;
+    decode_queue_subcount_dec(&queue_size_az, "az");
     queue_data_free_list[queue_size] = queue_data_index;
     if (queue_position <= (queue_size_az >> 1)) {
       while (queue_position != 0) {
@@ -369,7 +462,7 @@ struct sym_data * dupdate_az_queue(uint8_t queue_position) {
         + 3 * ((queue_data_ptr->bytes.type >> 4) == 2);
     if (DecodeGoMtf(context, 1) == 0) {
       queue_size--;
-      queue_size_az--;
+      decode_queue_subcount_dec(&queue_size_az, "az");
       queue_data_free_list[queue_size] = queue_data_index;
       struct sym_data * dict_data_ptr = dadd_dictionary_symbol(queue_data_ptr->code_length, queue_data_ptr->starts);
       dict_data_ptr->string_index = queue_data_ptr->string_index;
@@ -413,11 +506,20 @@ struct sym_data * dupdate_az_queue(uint8_t queue_position) {
 
 struct sym_data * dupdate_space_queue(uint8_t queue_position) {
   struct sym_data2 * queue_data_ptr;
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (queue_position >= queue_size_space) {
+    fprintf(stderr,
+        "GLZA decode: space queue position %u out of range (queue_size_space=%u)\n",
+        (unsigned int)queue_position, (unsigned int)queue_size_space);
+    decode_queue_fail("space MTF queue position out of range");
+    return(0);
+  }
   uint8_t queue_data_index = queue_space[(uint8_t)(queue_position + queue_offset_space)];
   queue_data_ptr = &queue_data[queue_data_index];
   if ((queue_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) && (--queue_data_ptr->bytes.remaining == 0)) {
     queue_size--;
-    queue_size_space--;
+    decode_queue_subcount_dec(&queue_size_space, "space");
     queue_data_free_list[queue_size] = queue_data_index;
     if (queue_position <= (queue_size_space >> 1)) {
       while (queue_position != 0) {
@@ -438,7 +540,7 @@ struct sym_data * dupdate_space_queue(uint8_t queue_position) {
         + 3 * ((queue_data_ptr->bytes.type >> 4) == 2);
     if (DecodeGoMtf(context, 1) == 0) {
       queue_size--;
-      queue_size_space--;
+      decode_queue_subcount_dec(&queue_size_space, "space");
       queue_data_free_list[queue_size] = queue_data_index;
       struct sym_data * dict_data_ptr = dadd_dictionary_symbol(queue_data_ptr->code_length, queue_data_ptr->starts);
       dict_data_ptr->string_index = queue_data_ptr->string_index;
@@ -482,11 +584,20 @@ struct sym_data * dupdate_space_queue(uint8_t queue_position) {
 
 struct sym_data * dupdate_other_queue(uint8_t queue_position) {
   struct sym_data2 * queue_data_ptr;
+  if (ReadDecoderFailed() != 0)
+    return(0);
+  if (queue_position >= queue_size_other) {
+    fprintf(stderr,
+        "GLZA decode: other queue position %u out of range (queue_size_other=%u)\n",
+        (unsigned int)queue_position, (unsigned int)queue_size_other);
+    decode_queue_fail("other MTF queue position out of range");
+    return(0);
+  }
   uint8_t queue_data_index = queue_other[(uint8_t)(queue_position + queue_offset_other)];
   queue_data_ptr = &queue_data[queue_data_index];
   if ((queue_data_ptr->bytes.remaining < MAX_INSTANCES_FOR_REMOVE) && (--queue_data_ptr->bytes.remaining == 0)) {
     queue_size--;
-    queue_size_other--;
+    decode_queue_subcount_dec(&queue_size_other, "other");
     queue_data_free_list[queue_size] = queue_data_index;
     if (queue_position <= (queue_size_other >> 1)) {
       while (queue_position != 0) {
@@ -507,7 +618,7 @@ struct sym_data * dupdate_other_queue(uint8_t queue_position) {
         + 3 * ((queue_data_ptr->bytes.type >> 4) == 2);
     if (DecodeGoMtf(context, 1) == 0) {
       queue_size--;
-      queue_size_other--;
+      decode_queue_subcount_dec(&queue_size_other, "other");
       queue_data_free_list[queue_size] = queue_data_index;
       struct sym_data * dict_data_ptr = dadd_dictionary_symbol(queue_data_ptr->code_length, queue_data_ptr->starts);
       dict_data_ptr->string_index = queue_data_ptr->string_index;
@@ -1220,9 +1331,15 @@ struct sym_data * decode_new_cap_encoded(uint32_t * string_index_ptr) {
             sym_data_ptr = dupdate_az_queue(DecodeMtfPosAz(queue_size_az));
           prior_is_cap = ((prior_end = sym_data_ptr->bytes.ends) == 'C');
           prior_type = sym_data_ptr->bytes.type;
-          if (sym_data_ptr->string_length == 1)
+          if (sym_data_ptr->string_length == 1) {
+            if (!decode_dict_write_ok(end_string_index, 1, "mtf copy single")
+                || !decode_dict_ref_ok(sym_data_ptr->string_index, 1, "mtf copy single src"))
+              return(0);
             symbol_strings[end_string_index++] = symbol_strings[sym_data_ptr->string_index];
-          else {
+          } else {
+            if (!decode_dict_write_ok(end_string_index, sym_data_ptr->string_length, "mtf copy multi")
+                || !decode_dict_ref_ok(sym_data_ptr->string_index, sym_data_ptr->string_length, "mtf copy multi src"))
+              return(0);
             uint8_t * symbol_string_ptr = &symbol_strings[sym_data_ptr->string_index];
             uint8_t * end_symbol_string_ptr = symbol_string_ptr + sym_data_ptr->string_length;
             symbol_strings[end_string_index++] = *symbol_string_ptr++;
@@ -1867,6 +1984,11 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   // main decoding loop
   if (cap_encoded != 0) {
     sym_data_ptr = decode_new_cap_encoded(&new_string_index);
+    if (sym_data_ptr == 0 || ReadDecoderFailed() != 0) {
+      free(symbol_strings);
+      *outsize_ptr = 0;
+      return(0);
+    }
     *symbol_buffer_write_ptr++ = *(uint64_t *)&sym_data_ptr->string_index;
     while (1) {
       if (symbol_buffer_write_ptr == symbol_buffer_end_write_ptr)
@@ -2055,6 +2177,10 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
     outbuf_index += chars_to_write;
   }
   free(symbol_strings);
+  if (ReadDecoderFailed() != 0) {
+    *outsize_ptr = 0;
+    return(0);
+  }
   *outsize_ptr = outbuf_index;
   return(outbuf);
 }

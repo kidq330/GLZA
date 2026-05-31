@@ -31,7 +31,7 @@ uint16_t RangeScaleSID[2], FreqSID[2][16], RangeScaleINST[2][16], FreqINST[2][16
 uint16_t FreqWordTag[0x100], FreqERG[341], FreqGoMtf[0x5A0];
 uint16_t RangeScaleMtfPos[3], FreqMtfPos[3][0x100], FreqSymTypePriorType[0x34][2], FreqSymTypePriorEnd[0x100][2], FreqMtfFirst[2][3];
 uint8_t CapEncoded, UTF8Compliant, MaxBaseCode, MaxInstCode, *InBuffer, *OutBuffer;
-uint8_t CapInitialized, CapLockInitialized, EncoderFailed;
+uint8_t CapInitialized, CapLockInitialized, EncoderFailed, DecoderFailed;
 size_t OutBufferSize;
 uint16_t RangeScaleFirstCharSection[0x100][7], RangeScaleFirstChar[4][0x100];
 struct first_char_data {
@@ -52,6 +52,15 @@ static void encoder_fail(const char *reason) {
         "GLZA encode: %s (OutCharNum=%u OutBufferSize=%zu low=0x%08x range=0x%08x)\n",
         reason, (unsigned int)OutCharNum, OutBufferSize, low, range);
     EncoderFailed = 1;
+  }
+}
+
+static void decoder_fail(const char *reason) {
+  if (DecoderFailed == 0) {
+    fprintf(stderr,
+        "GLZA decode: %s (InCharNum=%u code=0x%08x low=0x%08x range=0x%08x)\n",
+        reason, (unsigned int)InCharNum, code, low, range);
+    DecoderFailed = 1;
   }
 }
 
@@ -513,6 +522,14 @@ void SetEncoderFailed(const char *reason) {
   encoder_fail(reason);
 }
 
+uint8_t ReadDecoderFailed() {
+  return(DecoderFailed);
+}
+
+void SetDecoderFailed(const char *reason) {
+  decoder_fail(reason);
+}
+
 void ResetCodecGlobals(void) {
   InCharNum = 0;
   OutCharNum = 0;
@@ -520,6 +537,7 @@ void ResetCodecGlobals(void) {
   OutBuffer = 0;
   OutBufferSize = 0;
   EncoderFailed = 0;
+  DecoderFailed = 0;
 }
 
 void NormalizeEncoder(uint32_t bot) {
@@ -1284,6 +1302,8 @@ void FinishEncoder() {
 }
 
 void NormalizeDecoder(uint32_t bot) {
+  if (DecoderFailed != 0)
+    return;
   while ((low ^ (low + range)) < TOP || (range < (bot) && ((range = -low & ((bot) - 1)), 1))) {
     code = (code << 8) | InBuffer[InCharNum++];
     low <<= 8;
@@ -1478,11 +1498,24 @@ uint8_t DecodeMtfFirst(uint8_t Context, uint16_t QueueSizeOther, uint16_t QueueS
 }
 
 uint8_t DecodeMtfPos(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPos");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        decoder_fail("MTF pos table overflow in DecodeMtfPos");
+        return(0);
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1533,11 +1566,24 @@ uint8_t DecodeMtfPos(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosAz(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosAz");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
     do {
+      if (last_queue_size_az >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF az queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_az);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosAz");
+        return(0);
+      }
       unused_queue_freq_az -= FreqMtfPos[2][last_queue_size_az++];
       if (last_queue_size_az > rescale_queue_size_az) {
         rescale_queue_size_az++;
@@ -1589,11 +1635,24 @@ uint8_t DecodeMtfPosAz(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosSpace(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosSpace");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
     do {
+      if (last_queue_size_space >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF space queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_space);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosSpace");
+        return(0);
+      }
       unused_queue_freq_space -= FreqMtfPos[1][last_queue_size_space++];
       if (last_queue_size_space > rescale_queue_size_space) {
         rescale_queue_size_space++;
@@ -1646,11 +1705,24 @@ uint8_t DecodeMtfPosSpace(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosOther(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosOther");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosOther");
+        return(0);
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -2007,6 +2079,7 @@ void InitDecoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   uint8_t i, j;
   CapInitialized = 0;
   CapLockInitialized = 0;
+  DecoderFailed = 0;
   CapEncoded = cap_encoded;
   UTF8Compliant = UTF8_compliant;
   MaxBaseCode = max_base_code;
