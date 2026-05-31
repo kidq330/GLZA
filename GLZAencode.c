@@ -841,7 +841,7 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
   const size_t WRITE_SIZE = 0x40000;
   uint8_t temp_char, base_bits, format, verbose, code_length, increase_length, decrease_length;
-  uint8_t *in_char_ptr, *end_char_ptr;
+  uint8_t *in_char_ptr, *end_char_ptr, *enc_buf;
   uint16_t queue_position;
   uint32_t i, j, k, num_symbols_defined, num_definitions_to_code, num_codes, grammar_size, dictionary_size;
   uint32_t num_more_than_15_inst_definitions, num_2_inst_definitions, num_greater_500, num_transmits_over_sqrt2, num_mtfs;
@@ -964,10 +964,14 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   symbol_ptr = symbol_array;
   while (symbol_ptr != end_symbol_ptr) {
     symbol = *symbol_ptr++;
-    if ((int32_t)symbol >= 0)
-      sd[symbol].count++;
-    else
-      sd[symbol - 0x80000000 + num_base_symbols].symbol_start_index = symbol_ptr - symbol_array;
+    if ((int32_t)symbol >= 0) {
+      if (symbol < num_codes)
+        sd[symbol].count++;
+    } else {
+      uint32_t rule_index = symbol - 0x80000000 + num_base_symbols;
+      if (rule_index < num_codes)
+        sd[rule_index].symbol_start_index = symbol_ptr - symbol_array;
+    }
   }
   sd[num_codes].symbol_start_index = symbol_ptr - symbol_array + 1;
 
@@ -2027,12 +2031,16 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   if (UTF8_compliant != 0)
     temp_char = 0x90;
 
-  if ((fd != 0) && ((outbuf = (uint8_t *)malloc(in_size * 2 + 100000)) == 0)) {
-    fprintf(stderr, "Error - encoded data memory allocation failed\n");
-    return(0);
+  {
+    size_t enc_buf_size = in_size * 4 + file_size + 100000;
+    if ((enc_buf = (uint8_t *)malloc(enc_buf_size)) == 0) {
+      fprintf(stderr, "Error - encoded data memory allocation failed\n");
+      return(0);
+    }
+    InitEncoder(temp_char, MAX_INSTANCES_FOR_REMOVE + (uint32_t)(max_regular_code_length - sd[ranked_symbols[0]].code_length) + 1,
+        cap_encoded, UTF8_compliant, use_mtf, enc_buf);
+    SetOutBufferCapacity(enc_buf_size);
   }
-  InitEncoder(temp_char, MAX_INSTANCES_FOR_REMOVE + (uint32_t)(max_regular_code_length - sd[ranked_symbols[0]].code_length) + 1,
-      cap_encoded, UTF8_compliant, use_mtf, outbuf);
 
   // HEADER:
   // BYTE 0:  4.0 * log2(file_size)
@@ -2085,6 +2093,7 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
       }
       if (0 == (sym_list_ptrs[i][j] = (uint32_t *)malloc(sizeof(uint32_t) * 4))) {
         fprintf(stderr, "Error - symbol list memory allocation failed\n");
+        free(enc_buf);
         return(0);
       }
       nsob[i][j] = 0;
@@ -2108,8 +2117,10 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
 
   symbol = *symbol_ptr++;
   sd[symbol].hits++;
-  if (embed_define(symbol, 0) == 0)
+  if (embed_define(symbol, 0) == 0) {
+    free(enc_buf);
     return(0);
+  }
 
   while (symbol_ptr < first_define_ptr) {
     symbol = *symbol_ptr++;
@@ -2122,8 +2133,10 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
           EncodeNewType(2, 0x2C + (sd[prior_symbol].type & 3), 'C', queue_size_az);
       } else
         EncodeNewTypeBinary(0, prior_end, queue_size);
-      if (embed_define(symbol, 0) == 0)
+      if (embed_define(symbol, 0) == 0) {
+        free(enc_buf);
         return(0);
+      }
     } else {
       if ((sd[symbol].type & 0x40) != 0) {
         if (prior_is_cap == 0)
@@ -2183,6 +2196,14 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
     }
   }
 
+  if (ReadEncoderFailed() != 0) {
+    fprintf(stderr, "ERROR - arithmetic encoder failed\n");
+    i = 0xFF;
+    if (UTF8_compliant != 0)
+      i = 0x90;
+    goto encode_cleanup;
+  }
+
   // send EOF and flush output
   if (cap_encoded != 0) {
     EncodeDictType(0, 4 + (sd[prior_symbol].type & 0x18) + 2 * (sd[prior_symbol].type & 7), prior_end, queue_size);
@@ -2200,6 +2221,7 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   i = 0xFF;
   if (UTF8_compliant != 0)
     i = 0x90;
+encode_cleanup:
   do {
     for (j = 1 ; j <= max_code_length ; j++) {
       free(sym_list_ptrs[i][j]);
@@ -2211,17 +2233,26 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   free(ranked_symbols);
   free(ranked_symbols2);
   free(transmits);
+  if (ReadEncoderFailed() != 0) {
+    free(enc_buf);
+    return(0);
+  }
   *outsize_ptr = ReadOutCharNum();
   if (fd != 0) {
     size_t writesize = 0;
     while (*outsize_ptr - writesize > WRITE_SIZE) {
-      fwrite(outbuf + writesize, 1, WRITE_SIZE, fd);
+      fwrite(enc_buf + writesize, 1, WRITE_SIZE, fd);
       writesize += WRITE_SIZE;
       fflush(fd);
     }
-    fwrite(outbuf + writesize, 1, *outsize_ptr - writesize, fd);
+    fwrite(enc_buf + writesize, 1, *outsize_ptr - writesize, fd);
     fflush(fd);
-    free(outbuf);
-  }
+  } else if (*outsize_ptr > file_size) {
+    fprintf(stderr, "Error - encoded output size %zu exceeds output buffer %zu\n", *outsize_ptr, file_size);
+    free(enc_buf);
+    return(0);
+  } else
+    memcpy(outbuf, enc_buf, *outsize_ptr);
+  free(enc_buf);
   return(1);
 }

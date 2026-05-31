@@ -28,6 +28,8 @@ void UpFreqMtfQueueNum(uint8_t Context, uint8_t mtf_queue_number);
 void IncreaseRange(uint32_t low_ranges, uint32_t ranges);
 void DoubleRange(uint8_t low_ranges);
 void WriteOutBuffer(uint8_t value);
+void SetOutBufferCapacity(size_t size);
+uint8_t ReadEncoderFailed();
 void EncodeDictTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize);
 void EncodeDictType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16_t QueueSize);
 void EncodeNewTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize);

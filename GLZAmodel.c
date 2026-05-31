@@ -31,7 +31,8 @@ uint16_t RangeScaleSID[2], FreqSID[2][16], RangeScaleINST[2][16], FreqINST[2][16
 uint16_t FreqWordTag[0x100], FreqERG[341], FreqGoMtf[0x5A0];
 uint16_t RangeScaleMtfPos[3], FreqMtfPos[3][0x100], FreqSymTypePriorType[0x34][2], FreqSymTypePriorEnd[0x100][2], FreqMtfFirst[2][3];
 uint8_t CapEncoded, UTF8Compliant, MaxBaseCode, MaxInstCode, *InBuffer, *OutBuffer;
-uint8_t CapInitialized, CapLockInitialized;
+uint8_t CapInitialized, CapLockInitialized, EncoderFailed;
+size_t OutBufferSize;
 uint16_t RangeScaleFirstCharSection[0x100][7], RangeScaleFirstChar[4][0x100];
 struct first_char_data {
   union {
@@ -44,6 +45,13 @@ struct first_char_data {
 };
 struct first_char_data FirstCharData[4][0x100][0x100];
 uint8_t NumBaseSymbols = 0;
+
+static void clamp_mtf_pos(uint8_t *position_ptr, uint16_t *queue_size_ptr) {
+  if (*queue_size_ptr > 0xFF)
+    *queue_size_ptr = 0xFF;
+  if (*queue_size_ptr != 0 && *position_ptr >= *queue_size_ptr)
+    *position_ptr = (uint8_t)(*queue_size_ptr - 1);
+}
 
 uint32_t ReadLow() {return(low);}
 uint32_t ReadRange() {return(range);}
@@ -464,11 +472,32 @@ void DoubleRange(uint8_t low_ranges) {
 }
 
 void WriteOutBuffer(uint8_t value) {
+  if (EncoderFailed != 0)
+    return;
+  if (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize) {
+    EncoderFailed = 1;
+    return;
+  }
   OutBuffer[OutCharNum++] = value;
 }
 
+void SetOutBufferCapacity(size_t size) {
+  OutBufferSize = size;
+}
+
+uint8_t ReadEncoderFailed() {
+  return(EncoderFailed);
+}
+
 void NormalizeEncoder(uint32_t bot) {
+  uint32_t normalize_steps = 0;
   while ((low ^ (low + range)) < TOP || (range < bot && ((range = -low & (bot - 1)), 1))) {
+    if (EncoderFailed != 0)
+      return;
+    if (++normalize_steps > 64 || (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize)) {
+      EncoderFailed = 1;
+      return;
+    }
     OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
     range <<= 8;
     low <<= 8;
@@ -651,11 +680,14 @@ void EncodeMtfFirst(uint8_t Context, uint8_t First, uint16_t QueueSizeOther, uin
 }
 
 void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
+  clamp_mtf_pos(&position, &QueueSize);
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF)
+        break;
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -706,11 +738,14 @@ void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
 
 
 void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
+  clamp_mtf_pos(&position, &QueueSize);
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
     do {
+      if (last_queue_size_az >= 0xFF)
+        break;
       unused_queue_freq_az -= FreqMtfPos[2][last_queue_size_az++];
       if (last_queue_size_az > rescale_queue_size_az) {
         rescale_queue_size_az++;
@@ -759,11 +794,14 @@ void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
+  clamp_mtf_pos(&position, &QueueSize);
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
     do {
+      if (last_queue_size_space >= 0xFF)
+        break;
       unused_queue_freq_space -= FreqMtfPos[1][last_queue_size_space++];
       if (last_queue_size_space > rescale_queue_size_space) {
         rescale_queue_size_space++;
@@ -812,11 +850,14 @@ void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosOther(uint8_t position, uint16_t QueueSize) {
+  clamp_mtf_pos(&position, &QueueSize);
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF)
+        break;
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1143,6 +1184,8 @@ void InitEncoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   NumBaseSymbols = 0;
   OutBuffer = bufptr;
   OutCharNum = 0;
+  OutBufferSize = 0;
+  EncoderFailed = 0;
   low = 0, range = -1;
   StartModelSymType(use_mtf, cap_encoded);
   StartModelMtfFirst();
@@ -1167,6 +1210,12 @@ void InitEncoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
 }
 
 void FinishEncoder() {
+  if (EncoderFailed != 0)
+    return;
+  if (OutBufferSize != 0 && OutCharNum + 4 > OutBufferSize) {
+    EncoderFailed = 1;
+    return;
+  }
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 16);
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 8);
