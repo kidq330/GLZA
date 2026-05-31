@@ -4834,7 +4834,7 @@ main_overlap_check_loop_end:
           invalid_count++;
         }
       } else {
-        uint32_t rule_num = symbol_value - 0x80000000;
+        uint32_t rule_num = symbol_value - 0x80000001;
         if (rule_num >= num_rules) {
           if (invalid_count < 8)
             fprintf(stderr,
