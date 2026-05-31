@@ -2635,7 +2635,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     order_ratio = (double)params->order;
   } else {
     create_words = 1;
-    fast_mode = 0;
+    fast_mode = 1;
     order_ratio = 0.0;
   }
   max_rules = 0xA00000;
