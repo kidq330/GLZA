@@ -1743,6 +1743,13 @@ uint8_t * GLZAdecode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint
   fd = fd_out;
   stride = outbuf_index = out_buffers_sent = next_write_buffer = two_threads = 0;
   dictionary_size = (uint32_t)(pow(2.0, 10.0 + 0.08 * (double)inbuf[0]));
+  {
+    uint32_t min_dict = (uint32_t)(in_size * 4);
+    if (min_dict < 0x200000)
+      min_dict = 0x200000;
+    if (dictionary_size < min_dict)
+      dictionary_size = min_dict;
+  }
   cap_encoded = inbuf[1] >> 7;
   UTF8_compliant = (inbuf[1] >> 6) & 1;
   use_mtf = (inbuf[1] >> 5) & 1;
