@@ -105,9 +105,11 @@ uint8_t GLZAformat(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t
       num_spaces++;
     if ((this_char >= 'A') && (this_char <= 'Z')) {
       num_AZ++;
-      next_char = *in_char_ptr & 0xDF;
-      if ((next_char >= 'A') && (next_char <= 'Z'))
-        num_az_post_AZ++;
+      if (in_char_ptr < end_char_ptr) {
+        next_char = *in_char_ptr & 0xDF;
+        if ((next_char >= 'A') && (next_char <= 'Z'))
+          num_az_post_AZ++;
+      }
     }
 
     while (in_char_ptr != end_char_ptr) {
@@ -117,9 +119,11 @@ uint8_t GLZAformat(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t
       if ((this_char >= 'A') && (this_char <= 'Z')) {
         num_AZ++;
         prev_char = *(in_char_ptr - 2) & 0xDF;
-        next_char = *in_char_ptr & 0xDF;
-        if ((next_char >= 'A') && (next_char <= 'Z'))
-          num_az_post_AZ++;
+        if (in_char_ptr < end_char_ptr) {
+          next_char = *in_char_ptr & 0xDF;
+          if ((next_char >= 'A') && (next_char <= 'Z'))
+            num_az_post_AZ++;
+        }
         if ((prev_char >= 'A') && (prev_char <= 'Z'))
           num_az_pre_AZ++;
       }
