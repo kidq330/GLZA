@@ -144,6 +144,26 @@ uint32_t find_string_length(uint32_t symbol_number) {
 }
 
 
+static uint32_t sum_dictionary_string_bytes(uint32_t num_codes_val, uint32_t *first_define) {
+  uint32_t total = 0;
+  uint8_t *visited = (uint8_t *)calloc(num_codes_val, 1);
+  uint32_t *walk_ptr;
+
+  if (visited == 0)
+    return(0);
+  walk_ptr = symbol_array;
+  while (walk_ptr < first_define) {
+    uint32_t sym = *walk_ptr++;
+    if (sym < num_codes_val && visited[sym] == 0) {
+      visited[sym] = 1;
+      total += find_string_length(sym);
+    }
+  }
+  free(visited);
+  return(total);
+}
+
+
 void get_symbol_category(uint32_t symbol_number, uint8_t *sym_type_ptr) {
   if (symbol_number >= num_base_symbols) {
     if ((sd[symbol_number].type & 8) != 0) {
@@ -1342,7 +1362,6 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   }
 
   num_transmits = 0;
-  dictionary_size = 0;
   for (i = 0 ; i < num_codes ; i++) {
     sd[i].hits = 0;
     sd[i].previous = 0xFFFFFFFF;
@@ -1353,7 +1372,6 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
     symbol = *symbol_ptr++;
     if (sd[symbol].previous == 0xFFFFFFFF) {
       get_embedded_symbols(symbol);
-      dictionary_size += find_string_length(symbol);
     } else {
       transmits[sd[symbol].previous].distance = num_transmits - sd[symbol].previous;
       transmits[num_transmits].distance = 0xFFFFFFFF;
@@ -2155,6 +2173,7 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   //   else
   // BYTE 5:  7=1, 6-0=stride
 
+  dictionary_size = sum_dictionary_string_bytes(num_codes, first_define_ptr);
   WriteOutBuffer((uint8_t)(12.5 * (log2((double)(dictionary_size + 0x400)) - 10.0)) + 1);
   WriteOutBuffer((cap_encoded << 7) | (UTF8_compliant << 6) | (use_mtf << 5) | (queue_miss_code_length[2] - 1));
   temp_char = (((format & 0xFE) != 0) << 5) | (sd[ranked_symbols[0]].code_length - 1);
