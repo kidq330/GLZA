@@ -48,7 +48,7 @@ const uint32_t NODE_DATA_STACK_DEPTH = MAX_MATCH_LENGTH + 32;
 const float BIG_FLOAT = 1000000000.0;
 
 uint32_t num_file_symbols, num_terminals;
-uint32_t *start_symbol_ptr, *symbol_counts, *next_match_ptr[8], num_starts[0x100], num_ends[0x100], o1c[0x100][0x100];
+uint32_t *start_symbol_ptr, *end_symbol_ptr, *symbol_counts, *next_match_ptr[8], num_starts[0x100], num_ends[0x100], o1c[0x100][0x100];
 int32_t *base_nodes_child_node_num;
 int16_t *score_map;
 uint8_t cap_encoded, fast_mode;
@@ -117,6 +117,7 @@ struct substitute_thread_data {
   uint32_t * out_symbol_ptr;
   uint32_t * symbol_counts;
   uint32_t * substitute_data;
+  uint32_t max_rule_symbol;
 };
 
 struct score_data {
@@ -360,6 +361,11 @@ struct node * split_node_for_overlap(struct node * node_ptr, uint32_t split_inde
 void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
   uint32_t search_symbol = *in_symbol_ptr;
   int32_t * base_node_child_num_ptr;
+  if (in_symbol_ptr >= end_symbol_ptr || (int32_t)*in_symbol_ptr < 0)
+    return;
+  uint32_t stream_len = (uint32_t)(end_symbol_ptr - start_symbol_ptr);
+  if ((uint32_t)(in_symbol_ptr - start_symbol_ptr) >= stream_len)
+    return;
   if (search_symbol < 0x80)
     base_node_child_num_ptr = &base_nodes_child_node_num[search_symbol];
   else
@@ -397,13 +403,20 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
 
   // found a matching sibling
   uint32_t * first_symbol_ptr = in_symbol_ptr - 1;
+  uint32_t * max_word_ptr = end_symbol_ptr - 1;
+  if (first_symbol_ptr + MAX_MATCH_LENGTH - 1 < max_word_ptr)
+    max_word_ptr = first_symbol_ptr + MAX_MATCH_LENGTH - 1;
   while (node_ptr->child_node_num != 0) {
     // matching sibling with child so check length of match
     uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
     if (num_extra_symbols != 0) {
+      if (node_ptr->last_match_index + num_extra_symbols + 1 >= stream_len)
+        return;
       uint32_t * node_symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
       uint32_t length = 1;
       do {
+        if (in_symbol_ptr + length > max_word_ptr)
+          return;
         if (*(node_symbol_ptr + length) != *(in_symbol_ptr + length)) { // insert node in branch
           if (*next_node_num_ptr + 1 >= nodes_num_limit)
             return;
@@ -428,6 +441,8 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
     }
     node_ptr->instances++;
     in_symbol_ptr += num_extra_symbols + 1;
+    if (in_symbol_ptr > max_word_ptr)
+      return;
     if (*(in_symbol_ptr - 1) == 0x20)
       return;
     search_symbol = *in_symbol_ptr;
@@ -455,13 +470,17 @@ void add_word_suffix(uint32_t *in_symbol_ptr, uint32_t *next_node_num_ptr) {
   // Matching node without child - extend branch, add child for previous instance, add child sibling
   node_ptr->instances = 2;
   node_ptr->child_node_num = *next_node_num_ptr;
+  if (node_ptr->last_match_index + 2 >= stream_len)
+    return;
   uint32_t * node_symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
-  uint32_t * max_symbol_ptr = first_symbol_ptr + MAX_MATCH_LENGTH - 1;
+  if (in_symbol_ptr + 1 > max_word_ptr)
+    return;
   if ((*(node_symbol_ptr + 1) == *(in_symbol_ptr + 1)) && (*in_symbol_ptr != 0x20)
-      && (in_symbol_ptr < max_symbol_ptr)) {
+      && (in_symbol_ptr < max_word_ptr)) {
     uint32_t length = 2;
-    while ((*(node_symbol_ptr + length) == *(in_symbol_ptr + length)) && (*(in_symbol_ptr + length - 1) != 0x20)
-        && (in_symbol_ptr + length <= max_symbol_ptr))
+    while ((in_symbol_ptr + length <= max_word_ptr)
+        && (*(node_symbol_ptr + length) == *(in_symbol_ptr + length))
+        && (*(in_symbol_ptr + length - 1) != 0x20))
       length++;
     node_ptr->num_extra_symbols = length - 1;
     node_ptr = create_suffix_node(*(node_symbol_ptr + length), node_symbol_ptr + length - start_symbol_ptr,
@@ -2071,7 +2090,7 @@ thread_overlap_check_loop_no_match:
   symbol = *in_symbol_ptr++;
   if (in_symbol_ptr >= end_symbol_ptr)
     return(0);
-  if (((int32_t)symbol < 0) || (child_ptr_array[symbol] == 0))
+  if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
     goto thread_overlap_check_loop_no_match;
   match_node_ptr = child_ptr_array[symbol];
 thread_overlap_check_loop_match:
@@ -2084,7 +2103,7 @@ thread_overlap_check_loop_match:
         shifted_symbol >>= 4;
       } else {
         if (match_node_ptr->miss_ptr == 0) {
-          if (((int32_t)symbol < 0) || (child_ptr_array[symbol] == 0))
+          if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
             goto thread_overlap_check_loop_no_match;
           match_node_ptr = child_ptr_array[symbol];
           goto thread_overlap_check_loop_match;
@@ -2202,7 +2221,7 @@ thread_overlap_check_loop_match:
   match_node_ptr = match_node_ptr->hit_ptr;
 
   if (match_node_ptr == 0) {
-    if (child_ptr_array[symbol] == 0)
+    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
       goto thread_overlap_check_loop_no_match;
     match_node_ptr = child_ptr_array[symbol];
     goto thread_overlap_check_loop_match;
@@ -2230,7 +2249,7 @@ thread_overlap_check_no_defs_loop_no_match:
   symbol = *in_symbol_ptr++;
   if (in_symbol_ptr >= end_symbol_ptr)
     return(0);
-  if (child_ptr_array[symbol] == 0)
+  if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
     goto thread_overlap_check_no_defs_loop_no_match;
   match_node_ptr = child_ptr_array[symbol];
 thread_overlap_check_no_defs_loop_match:
@@ -2243,7 +2262,7 @@ thread_overlap_check_no_defs_loop_match:
         shifted_symbol >>= 4;
       } else {
         if (match_node_ptr->miss_ptr == 0) {
-          if (child_ptr_array[symbol] == 0)
+          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
             goto thread_overlap_check_no_defs_loop_no_match;
           if (in_symbol_ptr > end_symbol_ptr)
             return(0);
@@ -2365,7 +2384,7 @@ thread_overlap_check_no_defs_loop_match:
   }
   match_node_ptr = match_node_ptr->hit_ptr;
   if (match_node_ptr == 0) {
-    if (child_ptr_array[symbol] == 0)
+    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
       goto thread_overlap_check_no_defs_loop_no_match;
     match_node_ptr = child_ptr_array[symbol];
     goto thread_overlap_check_no_defs_loop_match;
@@ -2501,6 +2520,8 @@ void *substitute_thread(void *arg) {
       } else if (data != 0xFFFFFFFF) {
         thread_data_ptr->in_symbol_ptr += (size_t)(data + 0x80000000);
         uint32_t symbol = thread_data_ptr->substitute_data[substitute_data_index++];
+        if (symbol > thread_data_ptr->max_rule_symbol)
+          return(0);
         *thread_data_ptr->out_symbol_ptr++ = symbol;
         thread_data_ptr->symbol_counts[symbol]++;
       } else
@@ -2520,7 +2541,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   uint32_t symbol, next_new_symbol_number, initial_max_scores, max_scores, first_define_index;
   uint32_t node_score_number, suffix_node_number, next_node_num, node_num_limit, max_match_length;
   uint32_t best_score_num_symbols, num_overlaps, max_x_log2_x, prior_match_score_number[MAX_PRIOR_MATCHES];
-  uint32_t *in_symbol_ptr, *previous_in_symbol_ptr, *out_symbol_ptr, *stop_symbol_ptr, *end_symbol_ptr;
+  uint32_t *in_symbol_ptr, *previous_in_symbol_ptr, *out_symbol_ptr, *stop_symbol_ptr;
   uint32_t *search_match_ptr, *start_cycle_symbol_ptr, *end_cycle_symbol_ptr, *node_string_start_ptr, *block_ptr;
   uint32_t *match_string_start_ptr, *match_strings, *new_symbol_number, *substitute_data;
   uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES], *stop_matches_symbol_ptr[8], new_rule_number[0x8000];
@@ -2588,6 +2609,8 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   max_rules = 0xA00000;
   if (max_rules > (in_size >> 4) + 0x110000)
     max_rules = (in_size >> 4) + 0x110000;
+  if (params != 0 && params->max_rules + 0x110000 < max_rules)
+    max_rules = params->max_rules + 0x110000;
 
   if ((0 == (symbol_counts = (uint32_t *)malloc(4 * max_rules)))
       || (0 == (symbol_ends = (struct symbol_ends_data *)malloc(max_rules * sizeof(struct symbol_ends_data))))
@@ -2904,8 +2927,9 @@ top_main_loop:
       while (1) {
         symbol = *in_symbol_ptr++;
         if (symbol == 0x20) {
-          if (((*in_symbol_ptr >= 0x80) && (UTF8_compliant != 0))
-              || ((*in_symbol_ptr < 0x80) && (word_start[*in_symbol_ptr] != 0))) {
+          if (in_symbol_ptr < end_symbol_ptr && (int32_t)*in_symbol_ptr >= 0
+              && (((*in_symbol_ptr >= 0x80) && (UTF8_compliant != 0))
+              || ((*in_symbol_ptr < 0x80) && (word_start[*in_symbol_ptr] != 0)))) {
             if (next_node_num < node_num_limit - 10)
               add_word_suffix(in_symbol_ptr, &next_node_num);
           }
@@ -3155,6 +3179,7 @@ top_main_loop:
           out_symbol_ptr = start_symbol_ptr;
 
           substitute_thread_data.in_symbol_ptr = start_symbol_ptr;
+          substitute_thread_data.max_rule_symbol = next_new_symbol_number + num_candidates - 1;
           substitute_data_write_index = 0;
           substitute_data_read_index = 0;
           pthread_create(&substitute_thread1, NULL, substitute_thread, (void *)&substitute_thread_data);
@@ -3469,84 +3494,84 @@ wmain_symbol_substitution_loop_end2:
     if (fast_mode == 0) {
       sum_symbols = symbol_counts[0];
       symbols_limit = symbols_div_100 * 5;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       main_max_symbol = i - 1;
       tree_thread_data[0].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 11;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[0].max_symbol = i - 1;
       tree_thread_data[1].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 17;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[1].max_symbol = i - 1;
       tree_thread_data[2].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 24;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[2].max_symbol = i - 1;
       tree_thread_data[3].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 32;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[3].max_symbol = i - 1;
       tree_thread_data[4].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 42;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[4].max_symbol = i - 1;
       tree_thread_data[5].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 52;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[5].max_symbol = i - 1;
       tree_thread_data[6].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 61;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[6].max_symbol = i - 1;
       tree_thread_data[7].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 69;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[7].max_symbol = i - 1;
       tree_thread_data[8].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 77;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[8].max_symbol = i - 1;
       tree_thread_data[9].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 86;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[9].max_symbol = i - 1;
       tree_thread_data[10].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 93;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[10].max_symbol = i - 1;
       tree_thread_data[11].min_symbol = i;
@@ -3589,91 +3614,91 @@ wmain_symbol_substitution_loop_end2:
     } else {
       sum_symbols = symbol_counts[0];
       symbols_limit = symbols_div_100 * 6;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       main_max_symbol = i - 1;
       tree_thread_data[0].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 12;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[0].max_symbol = i - 1;
       tree_thread_data[1].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 19;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[1].max_symbol = i - 1;
       tree_thread_data[2].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 26;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[2].max_symbol = i - 1;
       tree_thread_data[3].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 34;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[3].max_symbol = i - 1;
       tree_thread_data[4].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 43;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[4].max_symbol = i - 1;
       tree_thread_data[5].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 54;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[5].max_symbol = i - 1;
       tree_thread_data[6].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 67;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[6].max_symbol = i - 1;
       tree_thread_data[7].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 73;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[7].max_symbol = i - 1;
       tree_thread_data[8].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 79;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[8].max_symbol = i - 1;
       tree_thread_data[9].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 85;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[9].max_symbol = i - 1;
       tree_thread_data[10].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 90;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[10].max_symbol = i - 1;
       tree_thread_data[11].min_symbol = i;
       if (i < next_new_symbol_number - 1)
         sum_symbols += symbol_counts[i++];
       symbols_limit = symbols_div_100 * 95;
-      while (sum_symbols < symbols_limit)
+      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
         sum_symbols += symbol_counts[i++];
       tree_thread_data[11].max_symbol = i - 1;
       tree_thread_data[12].min_symbol = i;
@@ -4073,7 +4098,7 @@ done_building_tree_tree:
             match_node_ptr = &match_nodes[suffix_node_number];
             uint32_t *best_score_match_ptr;
             best_score_match_ptr = best_score_suffix_ptr;
-            if (child_ptr_array[symbol] != 0) {
+            if ((uint32_t)symbol < child_ptr_array_size && child_ptr_array[symbol] != 0) {
               if ((match_node_ptr->child_ptr != 0) && (match_node_ptr->child_ptr->miss_ptr == 0))
                 write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, child_ptr_array[symbol]);
               struct match_node * search_node_ptr = child_ptr_array[symbol];
@@ -4335,7 +4360,7 @@ main_overlap_check_loop_match:
         }
         match_node_ptr = match_node_ptr->hit_ptr;
         if (match_node_ptr == 0) {
-          if (child_ptr_array[symbol] == 0)
+          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
             goto main_overlap_check_loop_no_match;
           match_node_ptr = child_ptr_array[symbol];
           goto main_overlap_check_loop_match;
@@ -4347,7 +4372,7 @@ main_overlap_check_no_defs_loop_no_match:
         symbol = *in_symbol_ptr++;
         if (in_symbol_ptr >= stop_symbol_ptr)
           goto main_overlap_check_loop_end;
-        if (child_ptr_array[symbol] == 0)
+        if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
           goto main_overlap_check_no_defs_loop_no_match;
         match_node_ptr = child_ptr_array[symbol];
 main_overlap_check_no_defs_loop_match:
@@ -4359,7 +4384,7 @@ main_overlap_check_no_defs_loop_match:
               match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
               shifted_symbol >>= 4;
             } else if (match_node_ptr->miss_ptr == 0) {
-              if (child_ptr_array[symbol] == 0)
+              if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
                 goto main_overlap_check_no_defs_loop_no_match;
               if (in_symbol_ptr <= stop_symbol_ptr) {
                 match_node_ptr = child_ptr_array[symbol];
@@ -4482,7 +4507,7 @@ main_overlap_check_no_defs_loop_match:
         }
         match_node_ptr = match_node_ptr->hit_ptr;
         if (match_node_ptr == 0) {
-          if (child_ptr_array[symbol] == 0)
+          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
             goto main_overlap_check_no_defs_loop_no_match;
           match_node_ptr = child_ptr_array[symbol];
           goto main_overlap_check_no_defs_loop_match;
