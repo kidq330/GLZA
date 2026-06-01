@@ -65,7 +65,7 @@ link_harness() {
   local out=$1
   shift
   # shellcheck disable=SC2086
-  $CLANG $CFLAGS -o "$out" "$@" $OBJS -lm -pthread
+  $CLANG $CFLAGS -o "$out" "./scripts/test/$@" $OBJS -lm -pthread
 }
 
 build_harnesses() {
