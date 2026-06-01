@@ -161,7 +161,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
   run_case "max_rules=6300 10m" "./rt_large 6300 enwik10m" 0
   run_case "max_rules=6310 10m" "./rt_large 6310 enwik10m" 0
   run_case "max_rules=6320 10m" "./rt_large 6320 enwik10m" 0
-  run_case "max_rules=6300 100m" "./rt_large 6300 enwik100m" 0
+  run_case "max_rules=6300 100m (flaky 139)" "./rt_large 6300 enwik100m" 0
   run_case "max_rules=6310 100m" "./rt_large 6310 enwik100m" 0
   run_case "max_rules=6320 100m" "./rt_large 6320 enwik100m" 0
 

@@ -234,12 +234,12 @@ uint8_t move_to_match_sibling(struct match_node *match_nodes, struct match_node 
   *sibling_number = (uint8_t)(shifted_symbol & 0xF);
   while (symbol != (*match_node_ptr_ptr)->symbol) {
     if ((*match_node_ptr_ptr)->sibling_node_num[*sibling_number] == 0)
-      return(0);
+      return 0;
     *match_node_ptr_ptr = &match_nodes[(*match_node_ptr_ptr)->sibling_node_num[*sibling_number]];
     shifted_symbol >>= 4;
     *sibling_number = (uint8_t)(shifted_symbol & 0xF);
   }
-  return(1);
+  return 1;
 }
 
 
@@ -252,7 +252,6 @@ void move_to_existing_match_sibling(struct match_node *match_nodes, struct match
     *match_node_ptr_ptr = &match_nodes[(*match_node_ptr_ptr)->sibling_node_num[sibling_number]];
     shifted_symbol >>= 4;
   }
-  return;
 }
 
 
@@ -261,12 +260,12 @@ uint8_t move_to_search_sibling(struct match_node *match_nodes, uint32_t symbol, 
   uint8_t sibling_nibble = (uint8_t)(shifted_symbol & 0xF);
   while (symbol != (*search_node_ptr_ptr)->symbol) {
     if ((*search_node_ptr_ptr)->sibling_node_num[sibling_nibble] == 0)
-      return(0);
+      return 0;
     *search_node_ptr_ptr = &match_nodes[(*search_node_ptr_ptr)->sibling_node_num[sibling_nibble]];
     shifted_symbol >>= 4;
     sibling_nibble = (uint8_t)(shifted_symbol & 0xF);
   }
-  return(1);
+  return 1;
 }
 
 
@@ -305,7 +304,6 @@ void move_to_match_child_with_make(struct match_node *match_nodes, struct match_
       init_match_node(*match_node_ptr_ptr, symbol, best_score_num_symbols, score_number);
     }
   }
-  return;
 }
 
 
@@ -324,7 +322,7 @@ void write_siblings_miss_ptr(struct match_node *match_nodes, struct match_node *
 struct node * create_suffix_node(uint32_t suffix_symbol, uint32_t symbol_index,
       uint32_t * next_node_num_ptr) {
   if (*next_node_num_ptr >= nodes_num_limit)
-    return(0);
+    return 0;
   struct node * node_ptr = &nodes[(*next_node_num_ptr)++];
   node_ptr->symbol = suffix_symbol;
   node_ptr->last_match_index = symbol_index;
@@ -340,7 +338,7 @@ struct node * create_suffix_node(uint32_t suffix_symbol, uint32_t symbol_index,
 struct node * split_node_for_overlap(struct node * node_ptr, uint32_t split_index, uint32_t in_symbol_index,
     uint32_t * next_node_num_ptr) {
   if (*next_node_num_ptr >= nodes_num_limit)
-    return(0);
+    return 0;
   uint32_t non_overlap_length = split_index - node_ptr->last_match_index;
   struct node * new_node_ptr = &nodes[*next_node_num_ptr];
   new_node_ptr->symbol = *(start_symbol_ptr + split_index);
@@ -735,12 +733,12 @@ void *build_tree_thread(void *arg) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
           pthread_mutex_unlock(&suffix_tree_mutex);
           if (next_node_num >= node_num_limit)
-            return(0);
+            return 0;
         }
       } while (in_symbol_ptr != local_scan_symbol_ptr);
     }
   }
-  return(0);
+  return 0;
 }
 
 
@@ -757,10 +755,10 @@ void *word_build_tree_thread(void *arg) {
       sched_yield();
     do {
       if (thread_data_ptr->start_positions[local_read_index & 0xFF] < 0)
-        return(0);
+        return 0;
       add_word_suffix(start_symbol_ptr + thread_data_ptr->start_positions[local_read_index & 0xFF], &next_node_num);
       if (next_node_num >= nodes_limit)
-        return(0);
+        return 0;
       atomic_store_explicit(&thread_data_ptr->read_index, ++local_read_index, memory_order_relaxed);
     } while (local_read_index != local_write_index);
   }
@@ -779,7 +777,7 @@ void *rank_scores_thread(void *arg) {
   while ((local_write_index = atomic_load_explicit(&rank_scores_write_index, memory_order_acquire)) == 0); // wait
   if (rank_scores_buffer[0].last_match_index == 0) {
     thread_data_ptr->num_candidates = 0;
-    return(0);
+    return 0;
   }
   candidates_index[0] = 0;
   candidates[0].score = rank_scores_buffer[0].score;
@@ -928,7 +926,7 @@ rank_scores_thread_node_done:
     atomic_store_explicit(&rank_scores_read_index, ++node_ptrs_num, memory_order_relaxed);
   }
   thread_data_ptr->num_candidates = num_candidates;
-  return(0);
+  return 0;
 }
 
 
@@ -1155,7 +1153,7 @@ rank_scores_thread_fast_node_done:
       section++;
     }
   }
-  return(0);
+  return 0;
 }
 
 
@@ -1207,7 +1205,7 @@ void *rank_word_scores_thread(void *arg) {
     atomic_store_explicit(&rank_scores_read_index, ++node_ptrs_num, memory_order_relaxed);
   }
   thread_data_ptr->num_candidates = num_candidates;
-  return(0);
+  return 0;
 }
 
 
@@ -2117,7 +2115,7 @@ void *overlap_check_thread(void *arg) {
 thread_overlap_check_loop_no_match:
   symbol = *in_symbol_ptr++;
   if (in_symbol_ptr >= end_symbol_ptr)
-    return(0);
+    return 0;
   if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
     goto thread_overlap_check_loop_no_match;
   match_node_ptr = child_ptr_array[symbol];
@@ -2276,7 +2274,7 @@ void *overlap_check_no_defs_thread(void *arg) {
 thread_overlap_check_no_defs_loop_no_match:
   symbol = *in_symbol_ptr++;
   if (in_symbol_ptr >= end_symbol_ptr)
-    return(0);
+    return 0;
   if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
     goto thread_overlap_check_no_defs_loop_no_match;
   match_node_ptr = child_ptr_array[symbol];
@@ -2293,7 +2291,7 @@ thread_overlap_check_no_defs_loop_match:
           if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
             goto thread_overlap_check_no_defs_loop_no_match;
           if (in_symbol_ptr > end_symbol_ptr)
-            return(0);
+            return 0;
           match_node_ptr = child_ptr_array[symbol];
           goto thread_overlap_check_no_defs_loop_match;
         } else {
@@ -2306,7 +2304,7 @@ thread_overlap_check_no_defs_loop_match:
   if (match_node_ptr->child_ptr != 0) {
     if (in_symbol_ptr > end_symbol_ptr)
       if (in_symbol_ptr - match_node_ptr->num_symbols >= end_symbol_ptr)
-        return(0);
+        return 0;
     match_node_ptr = match_node_ptr->child_ptr;
     goto thread_overlap_check_no_defs_loop_match;
   }
@@ -2421,7 +2419,7 @@ thread_overlap_check_no_defs_loop_match:
     match_node_ptr = match_node_ptr->child_ptr;
     goto thread_overlap_check_no_defs_loop_match;
   }
-  return(0);
+  return 0;
 }
 
 
@@ -2526,7 +2524,7 @@ thread_symbol_substitution_loop_end:
   atomic_store_explicit(&thread_data_ptr->write_index, substitute_index, memory_order_release);
 thread_symbol_substitution_loop_end2:
   atomic_store_explicit(&thread_data_ptr->done, 1, memory_order_relaxed);
-  return(0);
+  return 0;
 }
 
 
@@ -2552,377 +2550,100 @@ void *substitute_thread(void *arg) {
           fprintf(stderr,
               "GLZA compress: substitute_thread symbol %u > max_rule_symbol %u\n",
               (unsigned int)symbol, (unsigned int)thread_data_ptr->max_rule_symbol);
-          return(0);
+          return 0;
         }
         *thread_data_ptr->out_symbol_ptr++ = symbol;
         thread_data_ptr->symbol_counts[symbol]++;
       } else
-        return(0);
+        return 0;
       atomic_store_explicit(&substitute_data_read_index, substitute_data_index, memory_order_relaxed);
     } while (local_write_index != substitute_data_index);
   }
 }
 
-
-uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, struct param_data * params) {
-  const uint8_t INSERT_SYMBOL_CHAR = 0xFE;
-  const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
-  uint64_t available_RAM;
-  uint64_t max_memory_usage;
-  uint32_t UTF8_value;
-  uint32_t max_UTF8_value;
-  uint32_t max_rules;
-  uint32_t i;
-  uint32_t j;
-  uint32_t prior_cycle_symbols;
-  uint32_t num_terminals_used;
-  uint32_t num_rules;
-  uint32_t num_prior_matches;
-  uint32_t num_match_nodes;
-  uint32_t symbol;
-  uint32_t next_new_symbol_number;
-  uint32_t initial_max_scores;
-  uint32_t max_scores;
-  uint32_t first_define_index;
-  uint32_t node_score_number;
-  uint32_t suffix_node_number;
-  uint32_t next_node_num;
-  uint32_t node_num_limit;
-  uint32_t max_match_length;
-  uint32_t best_score_num_symbols;
-  uint32_t num_overlaps;
-  uint32_t max_x_log2_x;
-  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
-  uint32_t *in_symbol_ptr;
-  uint32_t *previous_in_symbol_ptr;
-  uint32_t *out_symbol_ptr;
-  uint32_t *stop_symbol_ptr;
-  uint32_t *search_match_ptr;
-  uint32_t *start_cycle_symbol_ptr;
-  uint32_t *end_cycle_symbol_ptr;
-  uint32_t *node_string_start_ptr;
-  uint32_t *block_ptr;
-  uint32_t *match_string_start_ptr;
-  uint32_t *match_strings;
-  uint32_t *new_symbol_number;
-  uint32_t *substitute_data;
-  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
-  uint32_t *stop_matches_symbol_ptr[8];
-  uint32_t new_rule_number[0x8000];
-  int32_t *base_node_child_num_ptr;
-  uint16_t scan_cycle;
-  uint16_t num_candidates;
-  uint16_t candidate_num;
-  uint16_t node_ptrs_num;
-  uint16_t *candidates_index;
-  uint16_t *candidates_position;
-  uint8_t UTF8_compliant;
-  uint8_t format;
-  uint8_t create_words;
-  uint8_t scan_mode;
-  uint8_t fast_sections;
-  uint8_t fast_section;
-  uint8_t section_repeats;
-  uint8_t max_terminal;
-  uint8_t *in_char_ptr;
-  uint8_t *end_char_ptr;
-  uint8_t *candidate_bad;
-  uint8_t *free_RAM_ptr;
-  uint8_t *end_RAM_ptr;
-  size_t block_size;
-  double d_num_file_symbols;
-  double order_0_entropy;
-  double profit_ratio_power;
-  double *symbol_entropy;
-  float log2_num_symbols_plus_substitution_cost;
-  float production_cost;
-  float *symbol_entropy_f;
-  float prior_min_score;
-  float new_min_score;
-  float cycle_start_ratio;
-  float cycle_end_ratio;
-  float fast_min_score;
-  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
-  float section_scores[23];
-  struct tree_thread_data tree_thread_data[13];
-  struct word_tree_thread_data word_tree_thread_data[4];
-  struct rank_scores_thread_data *rank_scores_data_ptr;
-  struct score_data *node_data;
-  struct find_substitutions_thread_data *find_substitutions_thread_data;
-  struct find_substitutions_thread_data *find_substitutions_thread_data_buf;
-  uint8_t *substitute_heap_buf;
-  size_t substitute_heap_size;
-  struct overlap_check *overlap_check_heap_buf;
-  struct substitute_thread_data substitute_thread_data;
-  struct match_node *match_node_ptr;
-  struct overlap_check *overlap_check_data;
-  pthread_t build_tree_threads[7];
-  pthread_t word_build_tree_threads[4];
-  pthread_t rank_scores_thread1;
-  pthread_t substitute_thread1;
-  pthread_t overlap_check_threads[7];
-  pthread_t find_substitutions_threads[7];
-
-  start_symbol_ptr = 0;
-  symbol_counts = 0;
-  score_map = 0;
-  find_substitutions_thread_data = 0;
-  find_substitutions_thread_data_buf = 0;
-  substitute_heap_buf = 0;
-  substitute_heap_size = 0;
-  overlap_check_heap_buf = 0;
-  atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
-  atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
-  atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
-  atomic_store_explicit(&substitute_data_read_index, 0, memory_order_relaxed);
-  atomic_store_explicit(&max_symbol_ptr, 0, memory_order_relaxed);
-  atomic_store_explicit(&scan_symbol_ptr, 0, memory_order_relaxed);
-  for (i = 0 ; i < 8 ; i++)
-    next_match_ptr[i] = 0;
-
-  if (sizeof(uint32_t *) >= 8)
-    max_memory_usage = 0x800000000;
-  else
-    max_memory_usage = 0x70000000;
-
-  if (params != 0) {
-    if (params->user_set_profit_ratio_power != 0)
-      profit_ratio_power = params->profit_ratio_power;
-    create_words = params->create_words;
-    if (in_size < 1000)
-      fast_mode = 0;
-    else
-      fast_mode = params->fast_mode;
-    order_ratio = (double)params->order;
-  } else {
-    create_words = 1;
-    fast_mode = 1;
-    order_ratio = 0.0;
-  }
-  max_rules = 0xA00000;
-  if (max_rules > (in_size >> 4) + 0x110000)
-    max_rules = (in_size >> 4) + 0x110000;
-  if (params != 0 && params->max_rules + 0x110000 < max_rules)
-    max_rules = params->max_rules + 0x110000;
-
-  if ((0 == (symbol_counts = (uint32_t *)malloc(4 * max_rules)))
-      || (0 == (symbol_ends = (struct symbol_ends_data *)malloc(max_rules * sizeof(struct symbol_ends_data))))
-      || (0 == (rank_scores_data_ptr = (struct rank_scores_thread_data *)malloc(sizeof(struct rank_scores_thread_data))))
-      || ((fast_mode != 0) && (0 == (score_map = (int16_t *)malloc(2 * in_size))))) {
-    fprintf(stderr, "ERROR - memory allocation failed\n");
-    return(0);
-  }
-
-  if (fast_mode == 0)
-    max_scores = MAX_SCORES;
-  else
-    max_scores = MAX_SCORES_FAST;
-  candidates = &rank_scores_data_ptr->candidates[0];
-  memset(num_starts, 0, 0x400);
-  memset(num_ends, 0, 0x400);
-  memset(o1c, 0, 0x40000);
-
-  if ((params != 0) && (params->user_set_RAM_size != 0)) {
-    available_RAM = (uint64_t)(params->RAM_usage * (float)0x100000);
-    if (available_RAM > max_memory_usage)
-      available_RAM = max_memory_usage;
-    if (0 == (start_symbol_ptr = (uint32_t *)malloc(available_RAM))) {
-      fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n", (size_t)available_RAM);
-      return(0);
-    }
-    if (available_RAM < (41 * (uint64_t)in_size) / 10) {
-      fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
-          (float)((41 * (uint64_t)in_size) / 10) / (float)0x100000 + 0.005);
-      return(0);
-    }
-  } else {
-    available_RAM = (uint64_t)in_size * 250 + 40000000;
-    if (available_RAM > max_memory_usage)
-      available_RAM = max_memory_usage;
-    if (available_RAM > 0x80000000 + 6 * (uint64_t)in_size)
-      available_RAM = 0x80000000 + 6 * (uint64_t)in_size;
-    do {
-      start_symbol_ptr = (uint32_t *)malloc(available_RAM);
-      if (start_symbol_ptr != 0)
-        break;
-      available_RAM = (available_RAM / 10) * 9;
-    } while (available_RAM > 1500000000);
-    if ((start_symbol_ptr == 0) || (available_RAM < (uint64_t)in_size * 9 / 2)) {
-      fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n",
-          (size_t)((available_RAM * 10) / 9));
-      return(0);
-    }
-  }
-  end_RAM_ptr = (uint8_t *)start_symbol_ptr + available_RAM;
-
-  // parse the file to determine UTF8_compliant
-  in_symbol_ptr = start_symbol_ptr;
-  num_rules = 0;
-  UTF8_compliant = 0;
-  format = **iobuf;
-  cap_encoded = (format == 1);
-  max_UTF8_value = 0x7F;
-  in_char_ptr = *iobuf + 1;
-  end_char_ptr = *iobuf + in_size;
-  if (format < 2) {
-    do {
-      uint8_t this_char = *in_char_ptr++;
-      if (this_char < 0x80)
-        *in_symbol_ptr++ = (uint32_t)this_char;
-      else if ((this_char < 0xC0) || (this_char >= 0xF2) || ((*in_char_ptr & 0xC0) != 0x80)) break;
-      else {
-        UTF8_value = 0x40 * (uint32_t)(this_char & 0x1F) + (*in_char_ptr++ & 0x3F);
-        if (this_char >= 0xE0) {
-          if ((*in_char_ptr & 0xC0) != 0x80) break;
-          UTF8_value = 0x40 * UTF8_value + (uint32_t)(*in_char_ptr++ & 0x3F);
-          if (this_char >= 0xF0) {
-            if ((*in_char_ptr & 0xC0) != 0x80) break;
-            UTF8_value = 0x40 * (UTF8_value & 0x7FFF) + (uint32_t)(*in_char_ptr++ & 0x3F);
-          }
-        }
-        *in_symbol_ptr++ = UTF8_value;
-        if (UTF8_value > max_UTF8_value)
-          max_UTF8_value = UTF8_value;
-      }
-    } while (in_char_ptr < end_char_ptr);
-    if (in_char_ptr == end_char_ptr)
-      UTF8_compliant = 1;
-  }
-
-#ifdef PRINTON
-  fprintf(stderr, "cap encoded: %u, UTF8 compliant %u\n", (unsigned int)cap_encoded, (unsigned int)UTF8_compliant);
-#endif
-
-  // create the initial grammar and count symbols
-  in_char_ptr = *iobuf + 1;
-  if (UTF8_compliant != 0) {
-    num_terminals = max_UTF8_value + 1;
-    max_terminal = 0x7F;
-    memset(symbol_counts, 0, 4 * num_terminals);
-    num_file_symbols = in_symbol_ptr - start_symbol_ptr;
-    end_symbol_ptr = in_symbol_ptr;
-    in_symbol_ptr = start_symbol_ptr;
-    while (in_symbol_ptr != end_symbol_ptr)
-      symbol_counts[*in_symbol_ptr++]++;
-#ifdef PRINTON
-    fprintf(stderr, "%u symbols, maximum UTF-8 value 0x%x\n",
-        (unsigned int)num_file_symbols, (unsigned int)max_UTF8_value);
-#endif
-    if ((params == 0) || (params->user_set_profit_ratio_power == 0)) {
-      if (fast_mode == 0)
-        profit_ratio_power = 2.0;
-      else
-        profit_ratio_power = 1.0;
-    }
-    for (i = 0 ; i < num_terminals ; i++)
-      symbol_ends[i].start = symbol_ends[i].end = get_UTF8_context(i);
-  } else {
-    num_terminals = 0x100;
-    max_terminal = 0xFF;
-    memset(symbol_counts, 0, 0x400);
-    in_symbol_ptr = start_symbol_ptr;
-    while (in_char_ptr != end_char_ptr) {
-      *in_symbol_ptr = (uint32_t)*in_char_ptr++;
-      symbol_counts[*in_symbol_ptr++]++;
-    }
-    num_file_symbols = in_symbol_ptr - start_symbol_ptr;
-    end_symbol_ptr = in_symbol_ptr;
-#ifdef PRINTON
-    fprintf(stderr, "%u symbols\n", (unsigned int)num_file_symbols);
-#endif
-    if ((params == 0) || (params->user_set_profit_ratio_power == 0)) {
-      if ((fast_mode == 0) && (cap_encoded != 0))
-        profit_ratio_power = 2.0;
-      else if ((format & 0xFE) == 0)
-        profit_ratio_power = 1.0;
-      else
-        profit_ratio_power = 0.0;
-    }
-    for (i = 0 ; i < num_terminals ; i++)
-      symbol_ends[i].start = symbol_ends[i].end = i;
-  }
-  free(*iobuf);
-  if (available_RAM
-      < 4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST) {
-    fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n",
-        (size_t)(4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST));
-    return(0);
-  }
-  if (params != 0) {
-    if (params->max_rules + num_terminals < max_rules)
-      max_rules = params->max_rules + num_terminals;
-  }
-
-  in_symbol_ptr = start_symbol_ptr;
-  uint8_t sym1, sym2;
-  sym2 = *in_symbol_ptr++;
-  while (in_symbol_ptr != end_symbol_ptr) {
-    sym1 = sym2;
-    sym2 = symbol_ends[*in_symbol_ptr++].end;
-    o1c[sym1][sym2]++;
-    num_ends[sym1]++;
-    num_starts[sym2]++;
-  }
-  max_x_log2_x = 0;
-  for (i = 0 ; i < 0x100 ; i++)
-    if (num_ends[i] > max_x_log2_x)
-      max_x_log2_x = num_ends[i];
-  max_x_log2_x += 2;
-  if (max_x_log2_x > NUM_PRECALCULATED_X_LOG2_X)
-    max_x_log2_x = NUM_PRECALCULATED_X_LOG2_X;
-
-  first_define_index = in_symbol_ptr - start_symbol_ptr;
-  *end_symbol_ptr = 0xFFFFFFFE;
-  size_t min_RAM = end_symbol_ptr - start_symbol_ptr + 2 * MAX_MATCH_LENGTH * sizeof(struct node);
-  if (min_RAM > available_RAM) {
-    fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
-        (float)min_RAM / (float)0x100000 + 0.005);
-    return(0);
-  }
-  if ((0 == (new_symbol_number = (uint32_t *)malloc(4 * max_scores)))
-      || (0 == (node_data = (struct score_data *)malloc(NODE_DATA_STACK_DEPTH * sizeof(struct score_data))))
-      || (0 == (candidates_index = (uint16_t *)malloc(2 * max_scores)))
-      || (0 == (candidate_bad = (uint8_t *)malloc(max_scores)))
-      || ((fast_mode == 0) && (0 == (x_log2_x = (double *)malloc(8 * max_x_log2_x))))) {
-    fprintf(stderr, "ERROR - memory allocation failed\n");
-    return(0);
-  }
-
-  num_terminals_used = 0;
-  for (i = 0 ; i < num_terminals ; i++)
-    if (symbol_counts[i] != 0)
-      num_terminals_used++;
-  for (i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++)
-    log2_x[i] = log2((double)i);
-  rank_scores_data_ptr->candidates_index = candidates_index;
-  if (fast_mode == 0) {
-    for (i = 1 ; i < max_x_log2_x ; i++)
-      x_log2_x[i] = (double)i * log2((double)i);
-    initial_max_scores = (uint32_t)(500.0 + 0.075 * sqrt((double)num_file_symbols));
-    fast_sections = 1;
-  } else {
-    if (0 == (candidates_position = (uint16_t *)malloc(2 * max_scores))) {
-      fprintf(stderr, "ERROR - memory allocation failed\n");
-      return(0);
-    }
-    rank_scores_data_ptr->candidates_position = candidates_position;
-    fast_sections = 23;
-    fast_section = 0;
-    fast_min_score = 4.0;
-    section_repeats = 0;
-    for (i = 0 ; i < 23 ; i++)
-      section_scores[i] = BIG_FLOAT;
-    initial_max_scores = (uint32_t)(100.0 + 22.0 * pow((double)num_file_symbols, 0.3333));
-  }
-  memset(candidate_bad, 0, max_scores);
-  min_score = 10.0;
-  prior_min_score = BIG_FLOAT;
-  cycle_start_ratio = 0.0;
-  cycle_end_ratio = 1.0;
-  prior_cycle_symbols = num_file_symbols;
-  scan_cycle = 0;
-  scan_mode = ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0);
-
+uint8_t main_loop(
+  uint32_t num_rules,
+  uint32_t next_new_symbol_number,
+  double d_num_file_symbols,
+  uint8_t* free_RAM_ptr,
+  double* symbol_entropy,
+  float* symbol_entropy_f,
+  uint8_t scan_mode,
+  float log2_num_symbols_plus_substitution_cost,
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS],
+  float production_cost,
+  double order_0_entropy,
+  uint32_t num_terminals_used,
+  uint8_t *end_RAM_ptr,
+  uint32_t node_num_limit,
+  int32_t* base_node_child_num_ptr,
+  uint32_t next_node_num,
+  uint32_t* in_symbol_ptr,
+  uint32_t symbol,
+  uint8_t UTF8_compliant,
+  uint16_t node_ptrs_num,
+  struct rank_scores_thread_data *rank_scores_data_ptr,
+  pthread_t rank_scores_thread1,
+  uint32_t max_scores,
+  struct score_data *node_data,
+  uint32_t prior_cycle_symbols,
+  uint16_t num_candidates,
+  uint32_t max_rules,
+  uint16_t *candidates_index,
+  size_t substitute_heap_size,
+  uint8_t *substitute_heap_buf,
+  uint32_t *substitute_data,
+  struct substitute_thread_data substitute_thread_data,
+  uint32_t num_match_nodes,
+  uint32_t max_match_length,
+  uint16_t candidate_num,
+  uint32_t *match_strings,
+  uint32_t *match_string_start_ptr,
+  uint32_t *node_string_start_ptr,
+  struct overlap_check *overlap_check_data,
+  struct overlap_check *overlap_check_heap_buf,
+  uint8_t *candidate_bad,
+  struct match_node *match_node_ptr,
+  uint32_t best_score_num_symbols,
+  struct find_substitutions_thread_data *find_substitutions_thread_data_buf,
+  struct find_substitutions_thread_data *find_substitutions_thread_data,
+  uint32_t *stop_symbol_ptr,
+  uint32_t *block_ptr,
+  pthread_t find_substitutions_threads[7],
+  uint32_t *previous_in_symbol_ptr,
+  uint32_t *out_symbol_ptr,
+  pthread_t substitute_thread1,
+  uint32_t first_define_index,
+  uint32_t initial_max_scores,
+  uint8_t max_terminal,
+  uint32_t *new_symbol_number,
+  float prior_min_score,
+  float cycle_start_ratio,
+  float cycle_end_ratio,
+  uint8_t fast_section,
+  uint8_t fast_sections,
+  uint32_t *start_cycle_symbol_ptr,
+  struct tree_thread_data tree_thread_data[13],
+  pthread_t build_tree_threads[7],
+  uint32_t *end_cycle_symbol_ptr,
+  double profit_ratio_power,
+  float fast_min_score,
+  float section_scores[23],
+  uint8_t section_repeats,
+  uint32_t *search_match_ptr,
+  uint32_t suffix_node_number,
+  size_t block_size,
+  uint32_t *stop_matches_symbol_ptr[8],
+  pthread_t overlap_check_threads[7],
+  uint32_t num_overlaps,
+  uint32_t num_prior_matches,
+  uint32_t node_score_number,
+  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES],
+  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES],
+  uint32_t new_rule_number[0x8000],
+  float new_min_score,
+  uint16_t scan_cycle
+) {
   do {
 top_main_loop:
     next_new_symbol_number = num_terminals + num_rules;
@@ -2935,7 +2656,7 @@ top_main_loop:
     free_RAM_ptr += (1 + ((scan_mode != 0) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
     if ((scan_mode != 0) && (fast_mode == 0)) {
       num_file_symbols_p1_x_log_file_symbols_p1 = (double)(num_file_symbols + 1) * log2((double)(num_file_symbols + 1));
-      for (i = 1 ; i < NUM_PRECALCULATED_NFSMR_LOGS ; i++)
+      for (size_t i = 1; i < NUM_PRECALCULATED_NFSMR_LOGS; i++)
         nfs_profit[i] = num_file_symbols_p1_x_log_file_symbols_p1
           - (double)(num_file_symbols - i + 1) * log2((double)(num_file_symbols - i + 1));
       if (num_rules != 0)
@@ -2945,17 +2666,16 @@ top_main_loop:
         new_rule_cost =  num_file_symbols_p1_x_log_file_symbols_p1 - d_num_file_symbols * log2(d_num_file_symbols) + 1.0;
     } else {
       log2_num_symbols_plus_substitution_cost = (float)log_file_symbols + 1.4;
-      for (i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++)
+      for (size_t i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++)
         new_symbol_cost[i] = log2_num_symbols_plus_substitution_cost - (float)log2_x[i - 1]; // -1 for repeats only
-      if (scan_mode == 0)
-        production_cost = log2f((float)d_num_file_symbols / (float)num_terminals_used) + 1.2;
-      else
-        production_cost = log2f((float)d_num_file_symbols / (float)(num_rules + 1)) + 1.2;
+        production_cost = scan_mode == 0
+                        ? log2f((float)d_num_file_symbols / (float)num_terminals_used) + 1.2
+                        : log2f((float)d_num_file_symbols / (float)(num_rules + 1)) + 1.2;
     }
 
     if (fast_mode == 0) {
       order_0_entropy = 0.0;
-      i = 0;
+      size_t i = 0;
       do {
         if (symbol_counts[i] != 0) {
           if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X)
@@ -2993,7 +2713,7 @@ top_main_loop:
       size_t nodes_room = (size_t)end_RAM_ptr - (size_t)nodes;
       if (nodes >= (struct node *)end_RAM_ptr || nodes_room < sizeof(struct node)) {
         fprintf(stderr, "ERROR - Insufficient RAM for suffix tree nodes\n");
-        return(0);
+        return 0;
       }
       node_num_limit = (uint32_t)(nodes_room / sizeof(struct node));
       nodes_num_limit = node_num_limit;
@@ -3010,11 +2730,11 @@ top_main_loop:
       next_node_num = 1;
       in_symbol_ptr = start_symbol_ptr;
       uint8_t word_start[0x80];
-      for (i = 0 ; i < 0x80 ; i++)
+      for (size_t i = 0 ; i < 0x80 ; i++)
         word_start[i] = 0;
-      for (i = 'a' ; i <= 'z' ; i++)
+      for (size_t i = 'a' ; i <= 'z' ; i++)
         word_start[i] = 1;
-      for (i = '0' ; i <= '9' ; i++)
+      for (size_t i = '0' ; i <= '9' ; i++)
         word_start[i] = 1;
       word_start['$'] = 1;
       while (1) {
@@ -3035,7 +2755,7 @@ top_main_loop:
       }
 
       if (fast_mode != 0) {
-        i = 0;
+        size_t i = 0;
         do {
           if (symbol_counts[i] != 0) {
             if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X)
@@ -3086,7 +2806,7 @@ top_main_loop:
             substitute_heap_size = substitute_heap_bytes;
             if (substitute_heap_buf == 0) {
               fprintf(stderr, "ERROR - substitute memory allocation failed\n");
-              return(0);
+              return 0;
             }
           }
           substitute_base = (char *)substitute_heap_buf;
@@ -3137,7 +2857,7 @@ top_main_loop:
           match_string_start_ptr = &match_strings[candidate_num * max_match_length];
           node_string_start_ptr = start_symbol_ptr + candidates[candidates_index[candidate_num]].last_match_index
               - candidates[candidates_index[candidate_num]].num_symbols + 1;
-          for (j = 0 ; j < candidates[candidates_index[candidate_num]].num_symbols ; j++)
+          for (size_t j = 0 ; j < candidates[candidates_index[candidate_num]].num_symbols ; j++)
             *(match_string_start_ptr + j) = *(node_string_start_ptr + j);
           candidate_num++;
         }
@@ -3147,12 +2867,12 @@ top_main_loop:
             overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
             if (overlap_check_heap_buf == 0) {
               fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-              return(0);
+              return 0;
             }
           }
           overlap_check_data = overlap_check_heap_buf;
         }
-        for (i = 1 ; i < 8 ; i++)
+        for (size_t i = 1 ; i < 8 ; i++)
           overlap_check_data[i].candidate_bad = &candidate_bad[0];
 
         uint16_t num_candidates_processed = 0;
@@ -3210,7 +2930,7 @@ top_main_loop:
           // Redo the tree build with just this subcycle's candidates
           child_ptr_array[0] = 0;
           num_match_nodes = 0;
-          j = next_new_symbol_number;
+          size_t j = next_new_symbol_number;
           candidate_num = 0;
           while (candidate_num < num_candidates) {
             if (candidate_bad[candidate_num] == 0) {
@@ -3240,7 +2960,7 @@ top_main_loop:
                   6 * sizeof(struct find_substitutions_thread_data));
               if (find_substitutions_thread_data_buf == 0) {
                 fprintf(stderr, "ERROR - find_substitutions memory allocation failed\n");
-                return(0);
+                return 0;
               }
               memset(find_substitutions_thread_data_buf, 0, 6 * sizeof(struct find_substitutions_thread_data));
             }
@@ -3263,7 +2983,7 @@ top_main_loop:
             find_substitutions_thread_data[4].stop_symbol_ptr = block_ptr;
             find_substitutions_thread_data[5].start_symbol_ptr = block_ptr;
             find_substitutions_thread_data[5].stop_symbol_ptr = end_symbol_ptr;
-            for (i = 0 ; i < 6 ; i++) {
+            for (size_t i = 0 ; i < 6 ; i++) {
               find_substitutions_thread_data[i].match_nodes = match_nodes;
               find_substitutions_thread_data[i].done = 0;
               find_substitutions_thread_data[i].read_index = 0;
@@ -3335,7 +3055,7 @@ wmain_symbol_substitution_loop_match_search:
               // found a match
               if ((substitute_index + 3) >= substitute_data_limit) {
                 fprintf(stderr, "ERROR - substitute_data buffer overflow\n");
-                return(0);
+                return 0;
               }
               if (((substitute_index + 2) & 0xFFFC) == 0)
                 while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
@@ -3372,7 +3092,7 @@ wmain_symbol_substitution_loop_end2:
           out_symbol_ptr = substitute_thread_data.out_symbol_ptr;
 
           if (num_file_symbols >= 100000000) {
-            for (i = 0 ; i < 6 ; i++) {
+            for (size_t i = 0 ; i < 6 ; i++) {
               uint32_t local_substitutions_write_index;
               uint32_t substitutions_index = 0;
               if (extra_match_symbols != 0) {
@@ -3429,7 +3149,7 @@ wmain_symbol_substitution_loop_end2:
           }
 
           // Add new production rules and update symbol counts
-          for (i = 0 ; i < num_candidates ; i++) {
+          for (size_t i = 0 ; i < num_candidates ; i++) {
             if (candidate_bad[i] == 0) {
               num_candidates_processed++;
               candidate_bad[i] = 2;
@@ -3504,7 +3224,7 @@ wmain_symbol_substitution_loop_end2:
         max_run_length[prior_symbol] = run_length;
 
       uint8_t found_run = 0;
-      for (i = 0 ; i <= max_terminal ; i++) {
+      for (size_t i = 0 ; i <= max_terminal ; i++) {
         if ((max_run_length[i] >= 63) && (next_new_symbol_number < max_rules)) {
           max_run_length[i] = 1 << (uint32_t)log2(sqrt((double)max_run_length[i] + 1.5));
           symbol_counts[next_new_symbol_number] = 0;
@@ -3550,7 +3270,7 @@ wmain_symbol_substitution_loop_end2:
         }
 
         // Add the new symbol definitions to the end of the data
-        for (i = 0 ; i <= max_terminal ; i++) {
+        for (size_t i = 0 ; i <= max_terminal ; i++) {
           if (max_run_length[i] != 0) {
             *out_symbol_ptr++ = 0x80000001 + num_rules;
             uint32_t j = 0;
@@ -3600,7 +3320,7 @@ wmain_symbol_substitution_loop_end2:
     uint32_t sum_symbols, symbols_limit, main_max_symbol, main_nodes_limit;
     uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
     uint32_t nodes_div_100 = node_num_limit / 100;
-    i = 1;
+    size_t i = 1;
     if (fast_mode == 0) {
       sum_symbols = symbol_counts[0];
       symbols_limit = symbols_div_100 * 5;
@@ -4170,7 +3890,7 @@ done_building_tree_tree:
       // Redo the tree build and miss values with just the valid score symbols
       match_node_ptr = match_nodes + next_new_symbol_number;
       num_match_nodes = 0;
-      j = next_new_symbol_number;
+      size_t j = next_new_symbol_number;
       while (j-- != 0)
         child_ptr_array[j] = 0;
       candidate_num = 0;
@@ -4247,7 +3967,7 @@ done_building_tree_tree:
           overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
           if (overlap_check_heap_buf == 0) {
             fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-            return(0);
+            return 0;
           }
         }
         overlap_check_data = overlap_check_heap_buf;
@@ -4845,6 +4565,425 @@ main_overlap_check_loop_end:
     if (max_scores > 100 * num_candidates)
       max_scores = 100 * num_candidates;
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
+}
+
+
+uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, struct param_data * params) {
+  const uint8_t INSERT_SYMBOL_CHAR = 0xFE;
+  const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
+  uint32_t i;
+  uint32_t j;
+  uint32_t num_prior_matches;
+  uint32_t num_match_nodes;
+  uint32_t symbol;
+  uint32_t next_new_symbol_number;
+  uint32_t node_score_number;
+  uint32_t suffix_node_number;
+  uint32_t next_node_num;
+  uint32_t node_num_limit;
+  uint32_t max_match_length;
+  uint32_t best_score_num_symbols;
+  uint32_t num_overlaps;
+  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
+  uint32_t *previous_in_symbol_ptr;
+  uint32_t *out_symbol_ptr;
+  uint32_t *stop_symbol_ptr;
+  uint32_t *search_match_ptr;
+  uint32_t *start_cycle_symbol_ptr;
+  uint32_t *end_cycle_symbol_ptr;
+  uint32_t *node_string_start_ptr;
+  uint32_t *block_ptr;
+  uint32_t *match_string_start_ptr;
+  uint32_t *match_strings;
+  uint32_t *substitute_data;
+  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
+  uint32_t *stop_matches_symbol_ptr[8];
+  uint32_t new_rule_number[0x8000];
+  int32_t *base_node_child_num_ptr;
+  uint16_t num_candidates;
+  uint16_t candidate_num;
+  uint16_t node_ptrs_num;
+  uint8_t *free_RAM_ptr;
+  size_t block_size;
+  double d_num_file_symbols;
+  double order_0_entropy;
+  double *symbol_entropy;
+  float log2_num_symbols_plus_substitution_cost;
+  float production_cost;
+  float *symbol_entropy_f;
+  float new_min_score;
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
+  struct tree_thread_data tree_thread_data[13];
+  struct word_tree_thread_data word_tree_thread_data[4];
+  struct find_substitutions_thread_data *find_substitutions_thread_data = NULL;
+  struct find_substitutions_thread_data *find_substitutions_thread_data_buf = NULL;
+  uint8_t *substitute_heap_buf = NULL;
+  size_t substitute_heap_size = 0;
+  struct overlap_check *overlap_check_heap_buf = NULL;
+  struct substitute_thread_data substitute_thread_data;
+  struct match_node *match_node_ptr;
+  struct overlap_check *overlap_check_data;
+  pthread_t build_tree_threads[7];
+  pthread_t word_build_tree_threads[4];
+  pthread_t rank_scores_thread1;
+  pthread_t substitute_thread1;
+  pthread_t overlap_check_threads[7];
+  pthread_t find_substitutions_threads[7];
+
+  start_symbol_ptr = 0;
+  symbol_counts = 0;
+  score_map = 0;
+  atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&substitute_data_read_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&max_symbol_ptr, 0, memory_order_relaxed);
+  atomic_store_explicit(&scan_symbol_ptr, 0, memory_order_relaxed);
+  memset(next_match_ptr, 0, 8);
+
+  uint64_t max_memory_usage = sizeof(uint32_t *) >= 8 ? 0x800000000 : 0x70000000;
+
+  // uint8_t fast_mode; // (global)
+  // double order_ratio; // (global)
+  double profit_ratio_power;
+  uint8_t create_words; // __jm__ bool?
+  {
+    if (params != 0) {
+      if (params->user_set_profit_ratio_power != 0)
+        profit_ratio_power = params->profit_ratio_power;
+      create_words = params->create_words;
+      fast_mode = in_size < 1000 ? 0 : params->fast_mode;
+      order_ratio = params->order;
+    } else {
+      create_words = 1;
+      fast_mode = 1;
+      order_ratio = 0.0;
+    }
+  }
+
+  uint32_t max_rules;
+  {
+    // max_rules = min(0xA00000, (in_size >> 4) + 0x110000);
+    max_rules = 0xA00000;
+    if (max_rules > (in_size >> 4) + 0x110000)
+      max_rules = (in_size >> 4) + 0x110000;
+    if (params != 0 && params->max_rules + 0x110000 < max_rules)
+      max_rules = params->max_rules + 0x110000;
+  }
+
+  struct rank_scores_thread_data *rank_scores_data_ptr;
+  if ((0 == (symbol_counts = (uint32_t *)malloc(4 * max_rules)))
+      || (0 == (symbol_ends = (struct symbol_ends_data *)malloc(max_rules * sizeof(struct symbol_ends_data))))
+      || (0 == (rank_scores_data_ptr = (struct rank_scores_thread_data *)malloc(sizeof(struct rank_scores_thread_data))))
+      || ((fast_mode != 0) && (0 == (score_map = (int16_t *)malloc(2 * in_size))))) {
+    fprintf(stderr, "ERROR - memory allocation failed\n");
+    return 0;
+  }
+
+  uint32_t max_scores = fast_mode == 1 ? MAX_SCORES_FAST : MAX_SCORES;
+  candidates = &rank_scores_data_ptr->candidates[0];
+  memset(num_starts, 0, 0x400);
+  memset(num_ends, 0, 0x400);
+  memset(o1c, 0, 0x40000);
+
+  uint64_t available_RAM;
+  if (params != 0 && params->user_set_RAM_size != 0) {
+    available_RAM = (uint64_t)(params->RAM_usage * (float)0x100000);
+    if (available_RAM > max_memory_usage)
+      available_RAM = max_memory_usage;
+    if (0 == (start_symbol_ptr = (uint32_t *)malloc(available_RAM))) {
+      fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n", (size_t)available_RAM);
+      return 0;
+    }
+    if (available_RAM < (41 * (uint64_t)in_size) / 10) {
+      fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
+          (float)((41 * (uint64_t)in_size) / 10) / (float)0x100000 + 0.005);
+      return 0;
+    }
+  } else {
+    available_RAM = (uint64_t)in_size * 250 + 40000000;
+    if (available_RAM > max_memory_usage)
+      available_RAM = max_memory_usage;
+    if (available_RAM > 0x80000000 + 6 * (uint64_t)in_size)
+      available_RAM = 0x80000000 + 6 * (uint64_t)in_size;
+    do {
+      start_symbol_ptr = (uint32_t *)malloc(available_RAM);
+      if (start_symbol_ptr != 0)
+        break;
+      available_RAM = (available_RAM / 10) * 9;
+    } while (available_RAM > 1500000000);
+    if ((start_symbol_ptr == 0) || (available_RAM < (uint64_t)in_size * 9 / 2)) {
+      fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n",
+          (size_t)((available_RAM * 10) / 9));
+      return 0;
+    }
+  }
+  uint8_t* end_RAM_ptr = (uint8_t *)start_symbol_ptr + available_RAM;
+
+  // parse the file to determine UTF8_compliant
+  uint32_t *in_symbol_ptr = start_symbol_ptr;
+  uint32_t num_rules = 0;
+  uint8_t UTF8_compliant = 0;
+  uint8_t format = **iobuf; // __jm__ not bool, actual byte
+  cap_encoded = (format == 1);
+  uint32_t max_UTF8_value = 0x7F;
+  uint8_t *in_char_ptr = *iobuf + 1;
+  uint8_t *end_char_ptr = *iobuf + in_size;
+
+  uint32_t UTF8_value;
+  if (format < 2) {
+    do {
+      uint8_t this_char = *in_char_ptr++;
+      if (this_char < 0x80)
+        *in_symbol_ptr++ = (uint32_t)this_char;
+      else if ((this_char < 0xC0) || (this_char >= 0xF2) || ((*in_char_ptr & 0xC0) != 0x80)) break;
+      else {
+        UTF8_value = 0x40 * (uint32_t)(this_char & 0x1F) + (*in_char_ptr++ & 0x3F);
+        if (this_char >= 0xE0) {
+          if ((*in_char_ptr & 0xC0) != 0x80) break;
+          UTF8_value = 0x40 * UTF8_value + (uint32_t)(*in_char_ptr++ & 0x3F);
+          if (this_char >= 0xF0) {
+            if ((*in_char_ptr & 0xC0) != 0x80) break;
+            UTF8_value = 0x40 * (UTF8_value & 0x7FFF) + (uint32_t)(*in_char_ptr++ & 0x3F);
+          }
+        }
+        *in_symbol_ptr++ = UTF8_value;
+        if (UTF8_value > max_UTF8_value)
+          max_UTF8_value = UTF8_value;
+      }
+    } while (in_char_ptr < end_char_ptr);
+    if (in_char_ptr == end_char_ptr)
+      UTF8_compliant = 1;
+  }
+
+#ifdef PRINTON
+  fprintf(stderr, "cap encoded: %u, UTF8 compliant %u\n", (unsigned int)cap_encoded, (unsigned int)UTF8_compliant);
+#endif
+
+  uint8_t max_terminal;
+  // create the initial grammar and count symbols
+  in_char_ptr = *iobuf + 1;
+  if (UTF8_compliant != 0) {
+    num_terminals = max_UTF8_value + 1;
+    max_terminal = 0x7F;
+    memset(symbol_counts, 0, 4 * num_terminals);
+    num_file_symbols = in_symbol_ptr - start_symbol_ptr;
+    end_symbol_ptr = in_symbol_ptr;
+    in_symbol_ptr = start_symbol_ptr;
+    while (in_symbol_ptr != end_symbol_ptr)
+      symbol_counts[*in_symbol_ptr++]++;
+#ifdef PRINTON
+    fprintf(stderr, "%u symbols, maximum UTF-8 value 0x%x\n",
+        (unsigned int)num_file_symbols, (unsigned int)max_UTF8_value);
+#endif
+    if (params == 0 || params->user_set_profit_ratio_power == 0) {
+      profit_ratio_power = fast_mode == 1 ? 1.0 : 2.0;
+    }
+    for (i = 0 ; i < num_terminals ; i++)
+      symbol_ends[i].start = symbol_ends[i].end = get_UTF8_context(i);
+  } else {
+    num_terminals = 0x100;
+    max_terminal = 0xFF;
+    memset(symbol_counts, 0, 0x400);
+    in_symbol_ptr = start_symbol_ptr;
+    while (in_char_ptr != end_char_ptr) {
+      *in_symbol_ptr = (uint32_t)*in_char_ptr++;
+      symbol_counts[*in_symbol_ptr++]++;
+    }
+    num_file_symbols = in_symbol_ptr - start_symbol_ptr;
+    end_symbol_ptr = in_symbol_ptr;
+#ifdef PRINTON
+    fprintf(stderr, "%u symbols\n", (unsigned int)num_file_symbols);
+#endif
+    if (params == 0 || params->user_set_profit_ratio_power == 0) {
+      if (fast_mode == 0 && cap_encoded != 0)
+        profit_ratio_power = 2.0;
+      else if ((format & 0xFE) == 0)
+        profit_ratio_power = 1.0;
+      else
+        profit_ratio_power = 0.0;
+    }
+    for (i = 0 ; i < num_terminals ; i++)
+      symbol_ends[i].start = symbol_ends[i].end = i;
+  }
+  free(*iobuf);
+  if (available_RAM
+      < 4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST) {
+    fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n",
+        (size_t)(4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST));
+    return 0;
+  }
+  if (params != 0 && params->max_rules + num_terminals < max_rules) {
+    max_rules = params->max_rules + num_terminals;
+  }
+
+  in_symbol_ptr = start_symbol_ptr;
+  uint8_t sym1;
+  uint8_t sym2 = *in_symbol_ptr++;
+  while (in_symbol_ptr != end_symbol_ptr) {
+    sym1 = sym2;
+    sym2 = symbol_ends[*in_symbol_ptr++].end;
+    o1c[sym1][sym2]++;
+    num_ends[sym1]++;
+    num_starts[sym2]++;
+  }
+
+  uint32_t max_x_log2_x = 0;
+  for (i = 0 ; i < 0x100 ; i++)
+    if (num_ends[i] > max_x_log2_x)
+      max_x_log2_x = num_ends[i];
+  max_x_log2_x += 2;
+  if (max_x_log2_x > NUM_PRECALCULATED_X_LOG2_X)
+    max_x_log2_x = NUM_PRECALCULATED_X_LOG2_X;
+
+  uint32_t first_define_index = in_symbol_ptr - start_symbol_ptr;
+  *end_symbol_ptr = 0xFFFFFFFE;
+  size_t min_RAM = end_symbol_ptr - start_symbol_ptr + 2 * MAX_MATCH_LENGTH * sizeof(struct node);
+  if (min_RAM > available_RAM) {
+    fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
+        (float)min_RAM / (float)0x100000 + 0.005);
+    return 0;
+  }
+
+  uint32_t *new_symbol_number;
+  struct score_data *node_data;
+  uint16_t *candidates_index;
+  uint8_t *candidate_bad;
+  if ((0 == (new_symbol_number = (uint32_t *)malloc(4 * max_scores)))
+      || (0 == (node_data = (struct score_data *)malloc(NODE_DATA_STACK_DEPTH * sizeof(struct score_data))))
+      || (0 == (candidates_index = (uint16_t *)malloc(2 * max_scores)))
+      || (0 == (candidate_bad = (uint8_t *)malloc(max_scores)))
+      || ((fast_mode == 0) && (0 == (x_log2_x = (double *)malloc(8 * max_x_log2_x))))) {
+    fprintf(stderr, "ERROR - memory allocation failed\n");
+    return 0;
+  }
+
+  uint32_t num_terminals_used = 0;
+  for (i = 0 ; i < num_terminals ; i++)
+    if (symbol_counts[i] != 0)
+      num_terminals_used++;
+  for (i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++)
+    log2_x[i] = log2((double)i);
+  rank_scores_data_ptr->candidates_index = candidates_index;
+
+  uint32_t initial_max_scores;
+  uint8_t fast_sections;
+  uint8_t fast_section;
+  float fast_min_score;
+  uint16_t *candidates_position;
+  uint8_t section_repeats;
+  float section_scores[23];
+  if (fast_mode == 0) {
+    for (i = 1 ; i < max_x_log2_x ; i++)
+      x_log2_x[i] = (double)i * log2((double)i);
+    initial_max_scores = (uint32_t)(500.0 + 0.075 * sqrt((double)num_file_symbols));
+    fast_sections = 1;
+  } else {
+    if (0 == (candidates_position = (uint16_t *)malloc(2 * max_scores))) {
+      fprintf(stderr, "ERROR - memory allocation failed\n");
+      return 0;
+    }
+    rank_scores_data_ptr->candidates_position = candidates_position;
+    fast_sections = 23;
+    fast_section = 0;
+    fast_min_score = 4.0;
+    section_repeats = 0;
+    for (i = 0 ; i < 23 ; i++)
+      section_scores[i] = BIG_FLOAT;
+    initial_max_scores = (uint32_t)(100.0 + 22.0 * pow((double)num_file_symbols, 0.3333));
+  }
+  memset(candidate_bad, 0, max_scores);
+  min_score = 10.0;
+  float prior_min_score = BIG_FLOAT;
+  float cycle_start_ratio = 0.0;
+  float cycle_end_ratio = 1.0;
+  uint32_t prior_cycle_symbols = num_file_symbols;
+  uint16_t scan_cycle = 0;
+  uint8_t scan_mode = ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0);
+
+  main_loop(
+    num_rules,
+    next_new_symbol_number,
+    d_num_file_symbols,
+    free_RAM_ptr,
+    symbol_entropy,
+    symbol_entropy_f,
+    scan_mode,
+    log2_num_symbols_plus_substitution_cost,
+    new_symbol_cost,
+    production_cost,
+    order_0_entropy,
+    num_terminals_used,
+    end_RAM_ptr,
+    node_num_limit,
+    base_node_child_num_ptr,
+    next_node_num,
+    in_symbol_ptr,
+    symbol,
+    UTF8_compliant,
+    node_ptrs_num,
+    rank_scores_data_ptr,
+    rank_scores_thread1,
+    max_scores,
+    node_data,
+    prior_cycle_symbols,
+    num_candidates,
+    max_rules,
+    candidates_index,
+    substitute_heap_size,
+    substitute_heap_buf,
+    substitute_data,
+    substitute_thread_data,
+    num_match_nodes,
+    max_match_length,
+    candidate_num,
+    match_strings,
+    match_string_start_ptr,
+    node_string_start_ptr,
+    overlap_check_data,
+    overlap_check_heap_buf,
+    candidate_bad,
+    match_node_ptr,
+    best_score_num_symbols,
+    find_substitutions_thread_data_buf,
+    find_substitutions_thread_data,
+    stop_symbol_ptr,
+    block_ptr,
+    find_substitutions_threads,
+    previous_in_symbol_ptr,
+    out_symbol_ptr,
+    substitute_thread1,
+    first_define_index,
+    initial_max_scores,
+    max_terminal,
+    new_symbol_number,
+    prior_min_score,
+    cycle_start_ratio,
+    cycle_end_ratio,
+    fast_section,
+    fast_sections,
+    start_cycle_symbol_ptr,
+    tree_thread_data,
+    build_tree_threads,
+    end_cycle_symbol_ptr,
+    profit_ratio_power,
+    fast_min_score,
+    section_scores,
+    section_repeats,
+    search_match_ptr,
+    suffix_node_number,
+    block_size,
+    stop_matches_symbol_ptr,
+    overlap_check_threads,
+    num_overlaps,
+    num_prior_matches,
+    node_score_number,
+    prior_match_end_ptr,
+    prior_match_score_number,
+    new_rule_number,
+    new_min_score,
+    scan_cycle
+  );
 
   if (fast_mode != 0) {
     free(score_map);
@@ -4860,9 +4999,9 @@ main_overlap_check_loop_end:
   free(candidates_index);
   free(candidate_bad);
 
-  if ((*iobuf = (uint8_t *)malloc(4 * num_file_symbols + 1)) == 0) {
+  if ((*iobuf = (uint8_t *)malloc((4 * num_file_symbols) + 1)) == 0) {
     fprintf(stderr, "ERROR - Compressed output buffer memory allocation failed\n");
-    return(0);
+    return 0;
   }
   in_char_ptr = *iobuf;
   if (UTF8_compliant != 0) {
@@ -4968,7 +5107,7 @@ main_overlap_check_loop_end:
   in_size = in_char_ptr - *iobuf;
   if ((*iobuf = (uint8_t *)realloc(*iobuf, in_size)) == 0) {
     fprintf(stderr, "ERROR - Compressed output buffer memory reallocation failed\n");
-    return(0);
+    return 0;
   }
   *outsize_ptr = in_size;
   free(substitute_heap_buf);
@@ -4980,5 +5119,5 @@ main_overlap_check_loop_end:
     fprintf(stderr, "PASS %u: grammar size %u, %u production rules  \n",
         (unsigned int)scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules);
 #endif
-  return(1);
+  return 1;
 }
