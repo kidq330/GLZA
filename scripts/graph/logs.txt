@@ -1,0 +1,10 @@
+1: grammar size: 322592223, 0 rules, 7.9990 bits/sym, o0e 322550678 bytes
+Start 0.0000 score[0-1846] = 54.26009-46.81872
+2: grammar size: 322486900, 1217 rules, 7.9997 bits/sym, o0e 322475764 bytes
+Start 0.0000 score[0-2657] = 51.80000-45.87863
+3: grammar size: 322420099, 2764 rules, 8.0005 bits/sym, o0e 322440357 bytes
+Start 0.0000 score[0-3147] = 50.30254-45.16841
+4: grammar size: 322378514, 3928 rules, 8.0012 bits/sym, o0e 322426092 bytes
+Start 0.0000 score[0-3055] = 49.35361-44.92665
+5: grammar size: 322350229, 4553 rules, 8.0017 bits/sym, o0e 322419662 bytes
+Start 0.0000 score[0-2665] = 47.84697-44.86892
