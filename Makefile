@@ -1,7 +1,7 @@
 PROG = GLZA
 CC = gcc
 CFLAGS = -O3 -DPRINTON -D_FILE_OFFSET_BITS=64
-LDFLAGS = -lm -static -pthread
+LDFLAGS = -lm -pthread
 
 SRCS = GLZA.c GLZAcomp.c GLZAformat.c GLZAcompress.c GLZAencode.c GLZAdecode.c GLZAmodel.c GLZAparams.c
 OBJS = $(SRCS:.c=.o)
