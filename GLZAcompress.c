@@ -3388,8 +3388,9 @@ top_main_loop:
         }
       } while (in_symbol_ptr != end_symbol_ptr);
       in_symbol_ptr = start_symbol_ptr;
-      if ((run_length != 0) && (run_length > max_run_length[prior_symbol]))
+      if ((run_length != 0) && (run_length > max_run_length[prior_symbol])) {
         max_run_length[prior_symbol] = run_length;
+      }
 
       uint8_t found_run = 0;
       for (size_t i = 0 ; i <= max_terminal ; i++) {
@@ -3793,12 +3794,10 @@ done_building_tree_tree:
     } else {
       do {
         symbol = *in_symbol_ptr++;
-        if (symbol <= main_max_symbol) {
-          if ((int32_t)*in_symbol_ptr >= 0) {
-            add_suffix(symbol, in_symbol_ptr, &next_node_num);
-            if (next_node_num >= main_nodes_limit)
-              break;
-          }
+        if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
+          add_suffix(symbol, in_symbol_ptr, &next_node_num);
+          if (next_node_num >= main_nodes_limit)
+            break;
         }
       } while (in_symbol_ptr != end_cycle_symbol_ptr);
       node_ptrs_num = 0;
@@ -4758,7 +4757,6 @@ main_overlap_check_loop_end:
 uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, struct param_data * params) {
   const uint8_t INSERT_SYMBOL_CHAR = 0xFE;
   const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
-  uint32_t next_new_symbol_number;
   // struct word_tree_thread_data word_tree_thread_data[4]; // __jm__ why the hell is this one unused????
   // pthread_t word_build_tree_threads[4];
 
@@ -5028,6 +5026,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   min_score = 10.0;
   uint16_t scan_cycle = 0;
 
+  uint32_t next_new_symbol_number;
   main_loop(
     &num_rules,
     &next_new_symbol_number,
