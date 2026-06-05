@@ -3465,28 +3465,15 @@ top_main_loop:
       }
     }
 
-    if (fast_mode == 0) {
-      if (cycle_start_ratio == 0.0) {
-        if (cycle_end_ratio < 1.0) {
-          if (cycle_end_ratio > 0.5)
-            cycle_start_ratio = 1.0 - 0.99 * cycle_end_ratio;
-          else
-            cycle_start_ratio = cycle_end_ratio;
-        }
-      } else if ((cycle_end_ratio >= 0.99) || (prior_cycle_symbols >= num_file_symbols)
-          || (1.5 * (1.0 - cycle_end_ratio) <= cycle_end_ratio - cycle_start_ratio))
-        cycle_start_ratio = 0.0;
-      else if ((uint32_t)((1.0 - cycle_end_ratio) * (float)num_file_symbols) >= prior_cycle_symbols)
-        cycle_start_ratio = cycle_end_ratio;
-      else
-        cycle_start_ratio = 1.0 - 0.97 * (cycle_end_ratio - cycle_start_ratio);
-    } else
-      cycle_start_ratio = (float)fast_section / (float)fast_sections;
+    cycle_start_ratio = update_cycle_start_ratio(fast_mode, cycle_start_ratio, cycle_end_ratio, fast_section, fast_sections, prior_cycle_symbols);
     start_cycle_symbol_ptr = start_symbol_ptr + (uint32_t)(cycle_start_ratio * (float)num_file_symbols);
     in_symbol_ptr = start_cycle_symbol_ptr;
 
     // setup to build the suffix tree
-    uint32_t sum_symbols, symbols_limit, main_max_symbol, main_nodes_limit;
+    uint32_t sum_symbols;
+    uint32_t symbols_limit;
+    uint32_t main_max_symbol;
+    uint32_t main_nodes_limit;
     uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
     uint32_t nodes_div_100 = node_num_limit / 100;
     size_t i = 1;
@@ -3606,6 +3593,7 @@ top_main_loop:
         tree_thread_data[i].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
         tree_thread_data[i].base_nodes_child_node_num = base_nodes_child_node_num;
       }
+
       scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
       max_symbol_ptr = 0;
       for (i = 0 ; i < 6 ; i++)
@@ -3725,15 +3713,15 @@ top_main_loop:
         tree_thread_data[i].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
         tree_thread_data[i].base_nodes_child_node_num = base_nodes_child_node_num;
       }
-      if (fast_section == fast_sections - 1)
-        end_cycle_symbol_ptr = end_symbol_ptr;
-      else
-        end_cycle_symbol_ptr = start_symbol_ptr
-            + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
+      end_cycle_symbol_ptr = fast_section == fast_sections - 1
+                           ? end_symbol_ptr
+                           : start_symbol_ptr + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
+
       atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_relaxed);
       atomic_store_explicit(&max_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_release);
-      for (i = 0 ; i < 7 ; i++)
+      for (i = 0 ; i < 7 ; i++) {
         pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
+      }
     }
     memset(base_nodes_child_node_num, 0, 4 * (main_max_symbol + 1) * BASE_NODES_CHILD_ARRAY_SIZE);
 
