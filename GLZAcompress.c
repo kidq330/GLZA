@@ -2563,12 +2563,12 @@ void *substitute_thread(void *arg) {
 }
 
 uint8_t main_loop(
-  uint32_t num_rules,
-  uint32_t next_new_symbol_number,
+  uint32_t* p_num_rules,
+  uint32_t * p_next_new_symbol_number,
   uint8_t scan_mode,
   uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
-  uint32_t* in_symbol_ptr,
+  uint32_t** p_in_symbol_ptr,
   uint8_t UTF8_compliant,
   struct rank_scores_thread_data *rank_scores_data_ptr,
   uint32_t max_scores,
@@ -2649,13 +2649,19 @@ uint8_t main_loop(
   pthread_t rank_scores_thread1;
   pthread_t substitute_thread1;
 
+
+  uint32_t next_new_symbol_number = *p_next_new_symbol_number;
+  uint32_t* in_symbol_ptr = *p_in_symbol_ptr;
+  uint32_t num_rules = *p_num_rules;
   uint16_t scan_cycle = *p_scan_cycle;
+
   do {
 top_main_loop:
     next_new_symbol_number = num_terminals + num_rules;
     child_ptr_array_size = next_new_symbol_number;
     d_num_file_symbols = (double)num_file_symbols;
     log_file_symbols = log2(d_num_file_symbols);
+    // __jm__ wtf does this & ~7 do
     free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
     symbol_entropy = (double *)free_RAM_ptr;
     symbol_entropy_f = (float *)free_RAM_ptr;
@@ -2700,14 +2706,15 @@ top_main_loop:
       }
       if (num_rules != 0)
         order_0_entropy += (double)(num_rules + 1) * (log_file_symbols - log2((double)num_rules));
+      // __jm__ why does one printf log num_rules and the other num_rules+1? seems like a bug
 #ifdef PRINTON
-      fprintf(stderr, "%u: grammar size: %u, %u rules, %.4f bits/sym, o0e %u bytes\n",
+      fprintf(stderr, "PASS %u: grammar size: %u, %u production rules, %.4f bits/sym, o0e %u bytes\n",
           (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules,
           (float)(order_0_entropy / d_num_file_symbols), (unsigned int)(order_0_entropy * 0.125));
 #endif
     } else {
 #ifdef PRINTON
-      fprintf(stderr, "PASS %u: grammar size %u, %u production rules\r",
+      fprintf(stderr, "PASS %u: grammar size: %u, %u production rules\r",
           (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules + 1);
 #endif
     }
@@ -2719,7 +2726,7 @@ top_main_loop:
       size_t nodes_room = (size_t)end_RAM_ptr - (size_t)nodes;
       if (nodes >= (struct node *)end_RAM_ptr || nodes_room < sizeof(struct node)) {
         fprintf(stderr, "ERROR - Insufficient RAM for suffix tree nodes\n");
-        return 0;
+        return 1;
       }
       node_num_limit = (uint32_t)(nodes_room / sizeof(struct node));
       nodes_num_limit = node_num_limit;
@@ -2812,7 +2819,7 @@ top_main_loop:
             substitute_heap_size = substitute_heap_bytes;
             if (substitute_heap_buf == 0) {
               fprintf(stderr, "ERROR - substitute memory allocation failed\n");
-              return 0;
+              return 1;
             }
           }
           substitute_base = (char *)substitute_heap_buf;
@@ -2873,7 +2880,7 @@ top_main_loop:
             overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
             if (overlap_check_heap_buf == 0) {
               fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-              return 0;
+              return 1;
             }
           }
           overlap_check_data = overlap_check_heap_buf;
@@ -2966,7 +2973,7 @@ top_main_loop:
                   6 * sizeof(struct find_substitutions_thread_data));
               if (find_substitutions_thread_data_buf == 0) {
                 fprintf(stderr, "ERROR - find_substitutions memory allocation failed\n");
-                return 0;
+                return 1;
               }
               memset(find_substitutions_thread_data_buf, 0, 6 * sizeof(struct find_substitutions_thread_data));
             }
@@ -3061,7 +3068,7 @@ wmain_symbol_substitution_loop_match_search:
               // found a match
               if ((substitute_index + 3) >= substitute_data_limit) {
                 fprintf(stderr, "ERROR - substitute_data buffer overflow\n");
-                return 0;
+                return 1;
               }
               if (((substitute_index + 2) & 0xFFFC) == 0)
                 while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
@@ -3973,7 +3980,7 @@ done_building_tree_tree:
           overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
           if (overlap_check_heap_buf == 0) {
             fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-            return 0;
+            return 1;
           }
         }
         overlap_check_data = overlap_check_heap_buf;
@@ -4573,10 +4580,15 @@ main_overlap_check_loop_end:
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
 
   // __jm__ mutate results
+  *p_next_new_symbol_number = next_new_symbol_number;
   *p_scan_cycle = scan_cycle;
+  *p_num_rules = num_rules;
+  *p_in_symbol_ptr = in_symbol_ptr;
   free(substitute_heap_buf);
   free(find_substitutions_thread_data_buf);
   free(overlap_check_heap_buf);
+
+  return 0;
 }
 
 
@@ -4596,7 +4608,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   atomic_store_explicit(&substitute_data_read_index, 0, memory_order_relaxed);
   atomic_store_explicit(&max_symbol_ptr, 0, memory_order_relaxed);
   atomic_store_explicit(&scan_symbol_ptr, 0, memory_order_relaxed);
-  memset(next_match_ptr, 0, 8);
+  memset(next_match_ptr, 0, 8 * sizeof(next_match_ptr[0]));
 
   uint64_t max_memory_usage = sizeof(uint32_t *) >= 8 ? 0x800000000 : 0x70000000;
 
@@ -4851,25 +4863,20 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
   memset(candidate_bad, 0, max_scores);
   min_score = 10.0;
-  float prior_min_score = BIG_FLOAT;
-  float cycle_start_ratio = 0.0;
-  float cycle_end_ratio = 1.0;
-  uint32_t prior_cycle_symbols = num_file_symbols;
   uint16_t scan_cycle = 0;
-  uint8_t scan_mode = ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0);
 
-  main_loop(
-    num_rules,
-    next_new_symbol_number,
-    scan_mode,
+  uint8_t rc = main_loop(
+    &num_rules,
+    &next_new_symbol_number,
+    ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0),
     num_terminals_used,
     end_RAM_ptr,
-    in_symbol_ptr,
+    &in_symbol_ptr,
     UTF8_compliant,
     rank_scores_data_ptr,
     max_scores,
     node_data,
-    prior_cycle_symbols,
+    num_file_symbols,
     max_rules,
     candidates_index,
     candidate_bad,
@@ -4877,9 +4884,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     initial_max_scores,
     max_terminal,
     new_symbol_number,
-    prior_min_score,
-    cycle_start_ratio,
-    cycle_end_ratio,
+    BIG_FLOAT,
+    0.0,
+    1.0,
     fast_section,
     fast_sections,
     profit_ratio_power,
@@ -4888,6 +4895,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     section_repeats,
     &scan_cycle
   );
+  if (rc != 0) {
+    return rc;
+  }
 
   if (fast_mode != 0) {
     free(score_map);

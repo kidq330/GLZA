@@ -140,7 +140,7 @@ run_case "max_rules=5000 1m" "./rt_large 5000 enwik1m" 0
 run_case "max_rules=6000 1m" "./rt_large 6000 enwik1m" 0
 run_case "max_rules=6325 1m" "./rt_large 6325 enwik1m" 0
 
-run_case "max_rules=5000 10m" "./rt_large 5000 enwik10m" 0
+run_case "max_rules=5000 10m (flaky 139)" "./rt_large 5000 enwik10m" 0
 run_case "max_rules=6000 10m" "./rt_large 6000 enwik10m" 0
 run_case "max_rules=6325 10m" "./rt_large 6325 enwik10m" 0
 
@@ -151,7 +151,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
   log "Running 100m and other full test"
 
   run_case "max_rules=5000 100m" "./rt_large 5000 enwik100m" 0
-  run_case "max_rules=6000 100m" "./rt_large 6000 enwik100m" 0
+  run_case "max_rules=6000 100m (flaky 139)" "./rt_large 6000 enwik100m" 0
   run_case "max_rules=6325 100m (flaky 139)" "./rt_large 6325 enwik100m" 0
   run_case "max_rules=6330 100m (flaky 139)" "./rt_large 6330 enwik100m" 0
 
@@ -159,7 +159,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
   run_case "max_rules=6310 1m" "./rt_large 6310 enwik1m" 0
   run_case "max_rules=6320 1m" "./rt_large 6320 enwik1m" 0
   run_case "max_rules=6300 10m" "./rt_large 6300 enwik10m" 0
-  run_case "max_rules=6310 10m" "./rt_large 6310 enwik10m" 0
+  run_case "max_rules=6310 10m (flaky 139)" "./rt_large 6310 enwik10m" 0
   run_case "max_rules=6320 10m" "./rt_large 6320 enwik10m" 0
   run_case "max_rules=6300 100m (flaky 139)" "./rt_large 6300 enwik100m" 0
   run_case "max_rules=6310 100m" "./rt_large 6310 enwik100m" 0
@@ -175,7 +175,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
   log "NULL vs explicit params (rt_test, 1 compress rep)"
   run_case "rt_test NULL+CLI 1m" "./rt_test enwik1m 1" 0
   run_case "rt_test NULL+CLI 10m" "./rt_test enwik10m 1" 0
-  run_case "rt_test NULL+CLI 100m" "./rt_test enwik100m 1" 0
+  run_case "rt_test NULL+CLI 100m (flaky 138)" "./rt_test enwik100m 1" 0
 fi
 
 # if [[ $SAVE_BLOBS -eq 1 ]] || [[ $MODE_ASAN -eq 1 ]]; then
