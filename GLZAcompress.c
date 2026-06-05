@@ -3478,218 +3478,74 @@ top_main_loop:
     uint32_t nodes_div_100 = node_num_limit / 100;
     size_t i = 1;
     if (fast_mode == 0) {
+      const uint8_t coeffs[] = {
+        5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
+      };
+      const size_t COEFFS_SIZE = 12;
       sum_symbols = symbol_counts[0];
-      symbols_limit = symbols_div_100 * 5;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      main_max_symbol = i - 1;
-      tree_thread_data[0].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 11;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[0].max_symbol = i - 1;
-      tree_thread_data[1].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 17;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[1].max_symbol = i - 1;
-      tree_thread_data[2].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 24;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[2].max_symbol = i - 1;
-      tree_thread_data[3].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 32;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[3].max_symbol = i - 1;
-      tree_thread_data[4].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 42;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[4].max_symbol = i - 1;
-      tree_thread_data[5].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 52;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[5].max_symbol = i - 1;
-      tree_thread_data[6].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 61;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[6].max_symbol = i - 1;
-      tree_thread_data[7].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 69;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[7].max_symbol = i - 1;
-      tree_thread_data[8].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 77;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[8].max_symbol = i - 1;
-      tree_thread_data[9].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 86;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[9].max_symbol = i - 1;
-      tree_thread_data[10].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 93;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[10].max_symbol = i - 1;
-      tree_thread_data[11].min_symbol = i;
-      tree_thread_data[11].max_symbol = next_new_symbol_number - 1;
+
+      for (size_t j = 0; j < COEFFS_SIZE; ++j) {
+        symbols_limit = symbols_div_100 * coeffs[j];
+        while (sum_symbols < symbols_limit && i < next_new_symbol_number) {
+          sum_symbols += symbol_counts[i++];
+        }
+        if (j - 1 >= 0) {
+          tree_thread_data[j - 1].max_symbol = i - 1;
+        } else {
+          main_max_symbol = i - 1;
+        }
+        tree_thread_data[j].min_symbol = i;
+        if (i < next_new_symbol_number - 1 && j < COEFFS_SIZE - 1) {
+          sum_symbols += symbol_counts[i++];
+        }
+      }
+      
+      tree_thread_data[COEFFS_SIZE - 1].max_symbol = next_new_symbol_number - 1;
 
       next_node_num = 1;
       main_nodes_limit = nodes_div_100 * 18 - 10;
-      tree_thread_data[6].first_node_num = 1;
-      tree_thread_data[6].nodes_limit = nodes_div_100 * 16;
-      tree_thread_data[0].first_node_num = nodes_div_100 * 18;
-      tree_thread_data[7].first_node_num = nodes_div_100 * 16;
-      tree_thread_data[0].nodes_limit = nodes_div_100 * 31;
-      tree_thread_data[7].nodes_limit = nodes_div_100 * 31;
-      tree_thread_data[1].first_node_num = nodes_div_100 * 31;
-      tree_thread_data[8].first_node_num = nodes_div_100 * 31;
-      tree_thread_data[1].nodes_limit = nodes_div_100 * 43;
-      tree_thread_data[8].nodes_limit = nodes_div_100 * 43;
-      tree_thread_data[2].first_node_num = nodes_div_100 * 43;
-      tree_thread_data[9].first_node_num = nodes_div_100 * 43;
-      tree_thread_data[2].nodes_limit = nodes_div_100 * 56;
-      tree_thread_data[9].nodes_limit = nodes_div_100 * 56;
-      tree_thread_data[3].first_node_num = nodes_div_100 * 56;
-      tree_thread_data[10].first_node_num = nodes_div_100 * 56;
-      tree_thread_data[3].nodes_limit = nodes_div_100 * 70;
-      tree_thread_data[10].nodes_limit = nodes_div_100 * 70;
-      tree_thread_data[4].first_node_num = nodes_div_100 * 70;
-      tree_thread_data[11].first_node_num = nodes_div_100 * 70;
-      tree_thread_data[4].nodes_limit = nodes_div_100 * 85;
-      tree_thread_data[11].nodes_limit = nodes_div_100 * 85;
-      tree_thread_data[5].first_node_num = nodes_div_100 * 85;
-      tree_thread_data[5].nodes_limit = node_num_limit;
-      for (i = 0 ; i < 12 ; i++) {
+
+      const uint8_t first_node_num_coeff[] = {
+        18, 31, 43, 56, 70, 85, 0xFF, 16, 31, 43, 56, 70
+      };
+      const uint8_t nodes_limit_coeff[] = {
+        31, 43, 56, 70, 85, 0xFF, 16, 31, 43, 56, 70, 85        
+      };
+      
+      for (size_t i = 0 ; i < COEFFS_SIZE ; i++) {
         tree_thread_data[i].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
         tree_thread_data[i].base_nodes_child_node_num = base_nodes_child_node_num;
+        tree_thread_data[i].first_node_num = i == 6 ? 1 : nodes_div_100 * first_node_num_coeff[i];
+        tree_thread_data[i].nodes_limit = i == 5 ? node_num_limit : nodes_div_100 * nodes_limit_coeff[i];
       }
 
       scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
       max_symbol_ptr = 0;
-      for (i = 0 ; i < 6 ; i++)
+      for (size_t i = 0 ; i < 6 ; i++) {
         pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
+      }
     } else {
+      const uint32_t coeffs[] = {
+        6, 12, 19, 26, 34, 43, 54, 67, 73, 79, 85, 90, 95
+      };
+      const size_t COEFFS_SIZE = 13;
+
       sum_symbols = symbol_counts[0];
-      symbols_limit = symbols_div_100 * 6;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      main_max_symbol = i - 1;
-      tree_thread_data[0].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 12;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[0].max_symbol = i - 1;
-      tree_thread_data[1].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 19;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[1].max_symbol = i - 1;
-      tree_thread_data[2].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 26;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[2].max_symbol = i - 1;
-      tree_thread_data[3].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 34;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[3].max_symbol = i - 1;
-      tree_thread_data[4].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 43;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[4].max_symbol = i - 1;
-      tree_thread_data[5].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 54;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[5].max_symbol = i - 1;
-      tree_thread_data[6].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 67;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[6].max_symbol = i - 1;
-      tree_thread_data[7].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 73;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[7].max_symbol = i - 1;
-      tree_thread_data[8].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 79;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[8].max_symbol = i - 1;
-      tree_thread_data[9].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 85;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[9].max_symbol = i - 1;
-      tree_thread_data[10].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 90;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[10].max_symbol = i - 1;
-      tree_thread_data[11].min_symbol = i;
-      if (i < next_new_symbol_number - 1)
-        sum_symbols += symbol_counts[i++];
-      symbols_limit = symbols_div_100 * 95;
-      while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-        sum_symbols += symbol_counts[i++];
-      tree_thread_data[11].max_symbol = i - 1;
-      tree_thread_data[12].min_symbol = i;
-      tree_thread_data[12].max_symbol = next_new_symbol_number - 1;
+      for (size_t j = 0; j < COEFFS_SIZE; ++j) {
+        symbols_limit = symbols_div_100 * coeffs[j];
+        while (sum_symbols < symbols_limit && i < next_new_symbol_number)
+          sum_symbols += symbol_counts[i++];
+        if (j > 0) {
+          tree_thread_data[j - 1].max_symbol = i - 1;
+        } else {
+          main_max_symbol = i - 1;
+        }
+        tree_thread_data[j].min_symbol = i;
+        if (i < next_new_symbol_number - 1 && j < COEFFS_SIZE - 1)
+          sum_symbols += symbol_counts[i++];
+      }
+
+      tree_thread_data[COEFFS_SIZE - 1].max_symbol = next_new_symbol_number - 1;
 
       next_node_num = 1;
       tree_thread_data[7].first_node_num = 1;
