@@ -742,6 +742,7 @@ void *build_tree_thread(void *arg) {
 }
 
 
+// __jm__ unused function!!
 void *word_build_tree_thread(void *arg) {
   struct word_tree_thread_data * thread_data_ptr = (struct word_tree_thread_data *)arg;
   uint32_t next_node_num = thread_data_ptr->first_node_num;
@@ -2564,55 +2565,18 @@ void *substitute_thread(void *arg) {
 uint8_t main_loop(
   uint32_t num_rules,
   uint32_t next_new_symbol_number,
-  double d_num_file_symbols,
-  uint8_t* free_RAM_ptr,
-  double* symbol_entropy,
-  float* symbol_entropy_f,
   uint8_t scan_mode,
-  float log2_num_symbols_plus_substitution_cost,
-  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS],
-  float production_cost,
-  double order_0_entropy,
   uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
-  uint32_t node_num_limit,
-  int32_t* base_node_child_num_ptr,
-  uint32_t next_node_num,
   uint32_t* in_symbol_ptr,
-  uint32_t symbol,
   uint8_t UTF8_compliant,
-  uint16_t node_ptrs_num,
   struct rank_scores_thread_data *rank_scores_data_ptr,
-  pthread_t rank_scores_thread1,
   uint32_t max_scores,
   struct score_data *node_data,
   uint32_t prior_cycle_symbols,
-  uint16_t num_candidates,
   uint32_t max_rules,
   uint16_t *candidates_index,
-  size_t substitute_heap_size,
-  uint8_t *substitute_heap_buf,
-  uint32_t *substitute_data,
-  struct substitute_thread_data substitute_thread_data,
-  uint32_t num_match_nodes,
-  uint32_t max_match_length,
-  uint16_t candidate_num,
-  uint32_t *match_strings,
-  uint32_t *match_string_start_ptr,
-  uint32_t *node_string_start_ptr,
-  struct overlap_check *overlap_check_data,
-  struct overlap_check *overlap_check_heap_buf,
   uint8_t *candidate_bad,
-  struct match_node *match_node_ptr,
-  uint32_t best_score_num_symbols,
-  struct find_substitutions_thread_data *find_substitutions_thread_data_buf,
-  struct find_substitutions_thread_data *find_substitutions_thread_data,
-  uint32_t *stop_symbol_ptr,
-  uint32_t *block_ptr,
-  pthread_t find_substitutions_threads[7],
-  uint32_t *previous_in_symbol_ptr,
-  uint32_t *out_symbol_ptr,
-  pthread_t substitute_thread1,
   uint32_t first_define_index,
   uint32_t initial_max_scores,
   uint8_t max_terminal,
@@ -2622,28 +2586,70 @@ uint8_t main_loop(
   float cycle_end_ratio,
   uint8_t fast_section,
   uint8_t fast_sections,
-  uint32_t *start_cycle_symbol_ptr,
-  struct tree_thread_data tree_thread_data[13],
-  pthread_t build_tree_threads[7],
-  uint32_t *end_cycle_symbol_ptr,
   double profit_ratio_power,
   float fast_min_score,
   float section_scores[23],
   uint8_t section_repeats,
-  uint32_t *search_match_ptr,
-  uint32_t suffix_node_number,
-  size_t block_size,
-  uint32_t *stop_matches_symbol_ptr[8],
-  pthread_t overlap_check_threads[7],
-  uint32_t num_overlaps,
-  uint32_t num_prior_matches,
-  uint32_t node_score_number,
-  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES],
-  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES],
-  uint32_t new_rule_number[0x8000],
-  float new_min_score,
-  uint16_t scan_cycle
+  uint16_t* p_scan_cycle
 ) {
+  uint32_t symbol;
+  uint32_t node_score_number;
+  uint32_t num_prior_matches;
+  uint32_t num_match_nodes;
+  uint32_t suffix_node_number;
+  uint32_t next_node_num;
+  uint32_t node_num_limit;
+  uint32_t max_match_length;
+  uint32_t best_score_num_symbols;
+  uint32_t num_overlaps;
+  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
+  uint32_t new_rule_number[0x8000];
+  uint32_t *previous_in_symbol_ptr;
+  uint32_t *out_symbol_ptr;
+  uint32_t *stop_symbol_ptr;
+  uint32_t *search_match_ptr;
+  uint32_t *start_cycle_symbol_ptr;
+  uint32_t *end_cycle_symbol_ptr;
+  uint32_t *node_string_start_ptr;
+  uint32_t *block_ptr;
+  uint32_t *match_string_start_ptr;
+  uint32_t *match_strings;
+  uint32_t *substitute_data;
+  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
+  uint32_t *stop_matches_symbol_ptr[8];
+  int32_t* base_node_child_num_ptr;
+  uint16_t num_candidates;
+  uint16_t candidate_num;
+  uint16_t node_ptrs_num;
+  float new_min_score;
+  float log2_num_symbols_plus_substitution_cost;
+  float production_cost;
+  float* symbol_entropy_f;
+  uint8_t* free_RAM_ptr;
+  size_t block_size;
+  double d_num_file_symbols;
+  double order_0_entropy;
+  double* symbol_entropy;
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
+  struct tree_thread_data tree_thread_data[13];
+
+  size_t substitute_heap_size = 0;
+  
+  uint8_t *substitute_heap_buf = NULL;
+  struct find_substitutions_thread_data *find_substitutions_thread_data_buf = NULL;
+  struct find_substitutions_thread_data *find_substitutions_thread_data = NULL;
+  struct overlap_check *overlap_check_heap_buf = NULL;
+  struct substitute_thread_data substitute_thread_data;
+  struct overlap_check *overlap_check_data;
+  struct match_node *match_node_ptr;
+
+  pthread_t build_tree_threads[7];
+  pthread_t overlap_check_threads[7];
+  pthread_t find_substitutions_threads[7];
+  pthread_t rank_scores_thread1;
+  pthread_t substitute_thread1;
+
+  uint16_t scan_cycle = *p_scan_cycle;
   do {
 top_main_loop:
     next_new_symbol_number = num_terminals + num_rules;
@@ -4565,70 +4571,21 @@ main_overlap_check_loop_end:
     if (max_scores > 100 * num_candidates)
       max_scores = 100 * num_candidates;
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
+
+  // __jm__ mutate results
+  *p_scan_cycle = scan_cycle;
+  free(substitute_heap_buf);
+  free(find_substitutions_thread_data_buf);
+  free(overlap_check_heap_buf);
 }
 
 
 uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, struct param_data * params) {
   const uint8_t INSERT_SYMBOL_CHAR = 0xFE;
   const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
-  uint32_t i;
-  uint32_t j;
-  uint32_t num_prior_matches;
-  uint32_t num_match_nodes;
-  uint32_t symbol;
   uint32_t next_new_symbol_number;
-  uint32_t node_score_number;
-  uint32_t suffix_node_number;
-  uint32_t next_node_num;
-  uint32_t node_num_limit;
-  uint32_t max_match_length;
-  uint32_t best_score_num_symbols;
-  uint32_t num_overlaps;
-  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
-  uint32_t *previous_in_symbol_ptr;
-  uint32_t *out_symbol_ptr;
-  uint32_t *stop_symbol_ptr;
-  uint32_t *search_match_ptr;
-  uint32_t *start_cycle_symbol_ptr;
-  uint32_t *end_cycle_symbol_ptr;
-  uint32_t *node_string_start_ptr;
-  uint32_t *block_ptr;
-  uint32_t *match_string_start_ptr;
-  uint32_t *match_strings;
-  uint32_t *substitute_data;
-  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
-  uint32_t *stop_matches_symbol_ptr[8];
-  uint32_t new_rule_number[0x8000];
-  int32_t *base_node_child_num_ptr;
-  uint16_t num_candidates;
-  uint16_t candidate_num;
-  uint16_t node_ptrs_num;
-  uint8_t *free_RAM_ptr;
-  size_t block_size;
-  double d_num_file_symbols;
-  double order_0_entropy;
-  double *symbol_entropy;
-  float log2_num_symbols_plus_substitution_cost;
-  float production_cost;
-  float *symbol_entropy_f;
-  float new_min_score;
-  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
-  struct tree_thread_data tree_thread_data[13];
-  struct word_tree_thread_data word_tree_thread_data[4];
-  struct find_substitutions_thread_data *find_substitutions_thread_data = NULL;
-  struct find_substitutions_thread_data *find_substitutions_thread_data_buf = NULL;
-  uint8_t *substitute_heap_buf = NULL;
-  size_t substitute_heap_size = 0;
-  struct overlap_check *overlap_check_heap_buf = NULL;
-  struct substitute_thread_data substitute_thread_data;
-  struct match_node *match_node_ptr;
-  struct overlap_check *overlap_check_data;
-  pthread_t build_tree_threads[7];
-  pthread_t word_build_tree_threads[4];
-  pthread_t rank_scores_thread1;
-  pthread_t substitute_thread1;
-  pthread_t overlap_check_threads[7];
-  pthread_t find_substitutions_threads[7];
+  // struct word_tree_thread_data word_tree_thread_data[4]; // __jm__ why the hell is this one unused????
+  // pthread_t word_build_tree_threads[4];
 
   start_symbol_ptr = 0;
   symbol_counts = 0;
@@ -4779,7 +4736,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     if (params == 0 || params->user_set_profit_ratio_power == 0) {
       profit_ratio_power = fast_mode == 1 ? 1.0 : 2.0;
     }
-    for (i = 0 ; i < num_terminals ; i++)
+    for (size_t i = 0 ; i < num_terminals ; i++)
       symbol_ends[i].start = symbol_ends[i].end = get_UTF8_context(i);
   } else {
     num_terminals = 0x100;
@@ -4803,7 +4760,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
       else
         profit_ratio_power = 0.0;
     }
-    for (i = 0 ; i < num_terminals ; i++)
+    for (size_t i = 0 ; i < num_terminals ; i++)
       symbol_ends[i].start = symbol_ends[i].end = i;
   }
   free(*iobuf);
@@ -4829,7 +4786,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
 
   uint32_t max_x_log2_x = 0;
-  for (i = 0 ; i < 0x100 ; i++)
+  for (size_t i = 0 ; i < 0x100 ; i++)
     if (num_ends[i] > max_x_log2_x)
       max_x_log2_x = num_ends[i];
   max_x_log2_x += 2;
@@ -4859,10 +4816,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
 
   uint32_t num_terminals_used = 0;
-  for (i = 0 ; i < num_terminals ; i++)
+  for (size_t i = 0 ; i < num_terminals ; i++)
     if (symbol_counts[i] != 0)
       num_terminals_used++;
-  for (i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++)
+  for (size_t i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++)
     log2_x[i] = log2((double)i);
   rank_scores_data_ptr->candidates_index = candidates_index;
 
@@ -4871,10 +4828,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   uint8_t fast_section;
   float fast_min_score;
   uint16_t *candidates_position;
-  uint8_t section_repeats;
+  uint8_t section_repeats; // __jm__ only initialized when fast_mode?
   float section_scores[23];
   if (fast_mode == 0) {
-    for (i = 1 ; i < max_x_log2_x ; i++)
+    for (size_t i = 1 ; i < max_x_log2_x ; i++)
       x_log2_x[i] = (double)i * log2((double)i);
     initial_max_scores = (uint32_t)(500.0 + 0.075 * sqrt((double)num_file_symbols));
     fast_sections = 1;
@@ -4888,7 +4845,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     fast_section = 0;
     fast_min_score = 4.0;
     section_repeats = 0;
-    for (i = 0 ; i < 23 ; i++)
+    for (size_t i = 0 ; i < 23 ; i++)
       section_scores[i] = BIG_FLOAT;
     initial_max_scores = (uint32_t)(100.0 + 22.0 * pow((double)num_file_symbols, 0.3333));
   }
@@ -4904,55 +4861,18 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   main_loop(
     num_rules,
     next_new_symbol_number,
-    d_num_file_symbols,
-    free_RAM_ptr,
-    symbol_entropy,
-    symbol_entropy_f,
     scan_mode,
-    log2_num_symbols_plus_substitution_cost,
-    new_symbol_cost,
-    production_cost,
-    order_0_entropy,
     num_terminals_used,
     end_RAM_ptr,
-    node_num_limit,
-    base_node_child_num_ptr,
-    next_node_num,
     in_symbol_ptr,
-    symbol,
     UTF8_compliant,
-    node_ptrs_num,
     rank_scores_data_ptr,
-    rank_scores_thread1,
     max_scores,
     node_data,
     prior_cycle_symbols,
-    num_candidates,
     max_rules,
     candidates_index,
-    substitute_heap_size,
-    substitute_heap_buf,
-    substitute_data,
-    substitute_thread_data,
-    num_match_nodes,
-    max_match_length,
-    candidate_num,
-    match_strings,
-    match_string_start_ptr,
-    node_string_start_ptr,
-    overlap_check_data,
-    overlap_check_heap_buf,
     candidate_bad,
-    match_node_ptr,
-    best_score_num_symbols,
-    find_substitutions_thread_data_buf,
-    find_substitutions_thread_data,
-    stop_symbol_ptr,
-    block_ptr,
-    find_substitutions_threads,
-    previous_in_symbol_ptr,
-    out_symbol_ptr,
-    substitute_thread1,
     first_define_index,
     initial_max_scores,
     max_terminal,
@@ -4962,27 +4882,11 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     cycle_end_ratio,
     fast_section,
     fast_sections,
-    start_cycle_symbol_ptr,
-    tree_thread_data,
-    build_tree_threads,
-    end_cycle_symbol_ptr,
     profit_ratio_power,
     fast_min_score,
     section_scores,
     section_repeats,
-    search_match_ptr,
-    suffix_node_number,
-    block_size,
-    stop_matches_symbol_ptr,
-    overlap_check_threads,
-    num_overlaps,
-    num_prior_matches,
-    node_score_number,
-    prior_match_end_ptr,
-    prior_match_score_number,
-    new_rule_number,
-    new_min_score,
-    scan_cycle
+    &scan_cycle
   );
 
   if (fast_mode != 0) {
@@ -5110,9 +5014,6 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     return 0;
   }
   *outsize_ptr = in_size;
-  free(substitute_heap_buf);
-  free(find_substitutions_thread_data_buf);
-  free(overlap_check_heap_buf);
   free(start_symbol_ptr);
 #ifdef PRINTON
   if (fast_mode != 0)

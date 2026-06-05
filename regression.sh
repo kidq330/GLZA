@@ -152,7 +152,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
 
   run_case "max_rules=5000 100m" "./rt_large 5000 enwik100m" 0
   run_case "max_rules=6000 100m" "./rt_large 6000 enwik100m" 0
-  run_case "max_rules=6325 100m" "./rt_large 6325 enwik100m" 0
+  run_case "max_rules=6325 100m (flaky 139)" "./rt_large 6325 enwik100m" 0
   run_case "max_rules=6330 100m (flaky 139)" "./rt_large 6330 enwik100m" 0
 
   run_case "max_rules=6300 1m" "./rt_large 6300 enwik1m" 0
@@ -163,7 +163,7 @@ if [[ $MODE_FULL -eq 1 ]]; then
   run_case "max_rules=6320 10m" "./rt_large 6320 enwik10m" 0
   run_case "max_rules=6300 100m (flaky 139)" "./rt_large 6300 enwik100m" 0
   run_case "max_rules=6310 100m" "./rt_large 6310 enwik100m" 0
-  run_case "max_rules=6320 100m" "./rt_large 6320 enwik100m" 0
+  run_case "max_rules=6320 100m (flaky 139)" "./rt_large 6320 enwik100m" 0
 
   run_case "max_rules=6340 1m" "./rt_large 6340 enwik1m" 0
   run_case "max_rules=6400 1m" "./rt_large 6400 enwik1m" 0
