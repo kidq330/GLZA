@@ -2559,6 +2559,53 @@ void *substitute_thread(void *arg) {
   }
 }
 
+uint32_t stca_setup(
+  uint8_t fast_mode,
+  const size_t thread_count,
+  uint8_t thread_symbol_limit[],
+  uint32_t thread_first_node_num[],
+  uint32_t thread_nodes_limit[],
+  uint32_t node_num_limit,
+  uint32_t num_rules,
+  uint32_t next_new_symbol_number,
+  struct tree_thread_data tree_thread_data[13],
+  uint32_t* start_cycle_symbol_ptr
+) {
+  uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
+  uint32_t nodes_div_100 = node_num_limit / 100;
+  uint32_t sum_symbols = symbol_counts[0];
+  size_t i = 1;
+
+  uint32_t main_max_symbol;
+  for (size_t j = 0; j < thread_count; ++j) {
+    uint32_t symbols_limit = symbols_div_100 * thread_symbol_limit[j];
+    while (sum_symbols < symbols_limit && i < next_new_symbol_number) {
+      sum_symbols += symbol_counts[i++];
+    }
+    if (j != 0) {
+      tree_thread_data[j - 1].max_symbol = i - 1;
+    } else {
+      main_max_symbol = i - 1;
+    }
+    tree_thread_data[j].min_symbol = i;
+    if (i < next_new_symbol_number - 1 && j < thread_count - 1) {
+      sum_symbols += symbol_counts[i++];
+    }
+  }
+  
+  tree_thread_data[thread_count - 1].max_symbol = next_new_symbol_number - 1;
+
+
+  for (size_t j = 0 ; j < thread_count ; j++) {
+    tree_thread_data[j].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
+    tree_thread_data[j].base_nodes_child_node_num = base_nodes_child_node_num;
+    tree_thread_data[j].first_node_num = thread_first_node_num[j];
+    tree_thread_data[j].nodes_limit = thread_nodes_limit[j];
+  }
+
+  return main_max_symbol;
+}
+
 float update_cycle_start_ratio(
   uint8_t fast_mode,
   float cycle_start_ratio,
@@ -3470,54 +3517,58 @@ top_main_loop:
     in_symbol_ptr = start_cycle_symbol_ptr;
 
     // setup to build the suffix tree
-    uint32_t sum_symbols;
-    uint32_t symbols_limit;
     uint32_t main_max_symbol;
     uint32_t main_nodes_limit;
-    uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
-    uint32_t nodes_div_100 = node_num_limit / 100;
     size_t i = 1;
+    uint32_t nodes_div_100 = node_num_limit / 100;
+    next_node_num = 1;
     if (fast_mode == 0) {
-      const uint8_t coeffs[] = {
-        5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
+      // NOLINTBEGIN(readability-magic-numbers)
+      uint8_t thread_symbol_limit[] = {
+            5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
       };
-      const size_t COEFFS_SIZE = 12;
-      sum_symbols = symbol_counts[0];
-
-      for (size_t j = 0; j < COEFFS_SIZE; ++j) {
-        symbols_limit = symbols_div_100 * coeffs[j];
-        while (sum_symbols < symbols_limit && i < next_new_symbol_number) {
-          sum_symbols += symbol_counts[i++];
-        }
-        if (j - 1 >= 0) {
-          tree_thread_data[j - 1].max_symbol = i - 1;
-        } else {
-          main_max_symbol = i - 1;
-        }
-        tree_thread_data[j].min_symbol = i;
-        if (i < next_new_symbol_number - 1 && j < COEFFS_SIZE - 1) {
-          sum_symbols += symbol_counts[i++];
-        }
-      }
-      
-      tree_thread_data[COEFFS_SIZE - 1].max_symbol = next_new_symbol_number - 1;
-
-      next_node_num = 1;
-      main_nodes_limit = nodes_div_100 * 18 - 10;
-
-      const uint8_t first_node_num_coeff[] = {
-        18, 31, 43, 56, 70, 85, 0xFF, 16, 31, 43, 56, 70
+      uint32_t thread_first_node_num[] = {
+        18 * nodes_div_100,
+        31 * nodes_div_100,
+        43 * nodes_div_100,
+        56 * nodes_div_100,
+        70 * nodes_div_100,
+        85 * nodes_div_100,
+        1,
+        16 * nodes_div_100,
+        31 * nodes_div_100,
+        43 * nodes_div_100,
+        56 * nodes_div_100,
+        70 * nodes_div_100
       };
-      const uint8_t nodes_limit_coeff[] = {
-        31, 43, 56, 70, 85, 0xFF, 16, 31, 43, 56, 70, 85        
+      uint32_t thread_nodes_limit[] = {
+        31 * nodes_div_100,
+        43 * nodes_div_100,
+        56 * nodes_div_100,
+        70 * nodes_div_100,
+        85 * nodes_div_100,
+        node_num_limit,
+        16 * nodes_div_100,
+        31 * nodes_div_100,
+        43 * nodes_div_100,
+        56 * nodes_div_100,
+        70 * nodes_div_100,
+        85 * nodes_div_100        
       };
-      
-      for (size_t i = 0 ; i < COEFFS_SIZE ; i++) {
-        tree_thread_data[i].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
-        tree_thread_data[i].base_nodes_child_node_num = base_nodes_child_node_num;
-        tree_thread_data[i].first_node_num = i == 6 ? 1 : nodes_div_100 * first_node_num_coeff[i];
-        tree_thread_data[i].nodes_limit = i == 5 ? node_num_limit : nodes_div_100 * nodes_limit_coeff[i];
-      }
+      main_nodes_limit = (nodes_div_100 * 18) - 10;
+      // NOLINTEND(readability-magic-numbers)
+      main_max_symbol = stca_setup(
+          fast_mode,
+          12,
+          thread_symbol_limit,
+          thread_first_node_num,
+          thread_nodes_limit,
+          node_num_limit,
+          num_rules,
+          next_new_symbol_number,
+          tree_thread_data,
+          start_cycle_symbol_ptr
+      );
 
       scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
       max_symbol_ptr = 0;
@@ -3525,57 +3576,62 @@ top_main_loop:
         pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
       }
     } else {
-      const uint32_t coeffs[] = {
+      // NOLINTBEGIN(readability-magic-numbers)
+      uint8_t thread_symbol_limit[] = {
         6, 12, 19, 26, 34, 43, 54, 67, 73, 79, 85, 90, 95
       };
-      const size_t COEFFS_SIZE = 13;
+      uint32_t thread_first_node_num[] = {
+        6,
+         12 * nodes_div_100,
+         22 * nodes_div_100,
+         34 * nodes_div_100,
+         48 * nodes_div_100,
+         64 * nodes_div_100,
+         81 * nodes_div_100,
+         1,
+         12 * nodes_div_100,
+         22 * nodes_div_100,
+         34 * nodes_div_100,
+         48 * nodes_div_100,
+         64 * nodes_div_100
+      };
+      uint32_t thread_nodes_limit[] = {
+        12 * nodes_div_100,
+         22 * nodes_div_100,
+         34 * nodes_div_100,
+         48 * nodes_div_100,
+         64 * nodes_div_100,
+         81 * nodes_div_100,
+         node_num_limit,
+         12 * nodes_div_100,
+         22 * nodes_div_100,
+         34 * nodes_div_100,
+         48 * nodes_div_100,
+         64 * nodes_div_100,
+         81 * nodes_div_100
+      };
+      main_nodes_limit = (nodes_div_100 * 6) - 10;
+      // NOLINTEND(readability-magic-numbers)
+      main_max_symbol = stca_setup(
+          fast_mode,
+          13,
+          thread_symbol_limit,
+          thread_first_node_num,
+          thread_nodes_limit,
+          node_num_limit,
+          num_rules,
+          next_new_symbol_number,
+          tree_thread_data,
+          start_cycle_symbol_ptr
+      );
 
-      sum_symbols = symbol_counts[0];
-      for (size_t j = 0; j < COEFFS_SIZE; ++j) {
-        symbols_limit = symbols_div_100 * coeffs[j];
-        while (sum_symbols < symbols_limit && i < next_new_symbol_number)
-          sum_symbols += symbol_counts[i++];
-        if (j > 0) {
-          tree_thread_data[j - 1].max_symbol = i - 1;
-        } else {
-          main_max_symbol = i - 1;
-        }
-        tree_thread_data[j].min_symbol = i;
-        if (i < next_new_symbol_number - 1 && j < COEFFS_SIZE - 1)
-          sum_symbols += symbol_counts[i++];
-      }
-
-      tree_thread_data[COEFFS_SIZE - 1].max_symbol = next_new_symbol_number - 1;
-
-      next_node_num = 1;
-      tree_thread_data[7].first_node_num = 1;
-      main_nodes_limit = nodes_div_100 * 6 - 10;
-      tree_thread_data[0].first_node_num = nodes_div_100 * 6;
-      tree_thread_data[0].nodes_limit = nodes_div_100 * 12;
-      tree_thread_data[7].nodes_limit = nodes_div_100 * 12;
-      tree_thread_data[1].first_node_num = tree_thread_data[8].first_node_num = nodes_div_100 * 12;
-      tree_thread_data[1].nodes_limit = tree_thread_data[8].nodes_limit = nodes_div_100 * 22;
-      tree_thread_data[2].first_node_num = tree_thread_data[9].first_node_num = nodes_div_100 * 22;
-      tree_thread_data[2].nodes_limit = tree_thread_data[9].nodes_limit = nodes_div_100 * 34;
-      tree_thread_data[3].first_node_num = tree_thread_data[10].first_node_num = nodes_div_100 * 34;
-      tree_thread_data[3].nodes_limit = tree_thread_data[10].nodes_limit = nodes_div_100 * 48;
-      tree_thread_data[4].first_node_num = tree_thread_data[11].first_node_num = nodes_div_100 * 48;
-      tree_thread_data[4].nodes_limit = tree_thread_data[11].nodes_limit = nodes_div_100 * 64;
-      tree_thread_data[5].first_node_num = tree_thread_data[12].first_node_num = nodes_div_100 * 64;
-      tree_thread_data[5].nodes_limit = tree_thread_data[12].nodes_limit = nodes_div_100 * 81;
-      tree_thread_data[6].first_node_num = nodes_div_100 * 81;
-      tree_thread_data[6].nodes_limit = node_num_limit;
-      for (i = 0 ; i < 13 ; i++) {
-        tree_thread_data[i].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
-        tree_thread_data[i].base_nodes_child_node_num = base_nodes_child_node_num;
-      }
       end_cycle_symbol_ptr = fast_section == fast_sections - 1
                            ? end_symbol_ptr
                            : start_symbol_ptr + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
 
       atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_relaxed);
       atomic_store_explicit(&max_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_release);
-      for (i = 0 ; i < 7 ; i++) {
+      for (size_t i = 0 ; i < 7 ; i++) {
         pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
       }
     }
