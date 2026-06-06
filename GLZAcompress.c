@@ -3329,6 +3329,123 @@ wmain_symbol_substitution_loop_end2:
   *ptr_substitute_heap_buf = substitute_heap_buf;
 }
 
+uint8_t scan_mode1(
+  uint32_t** out_in_symbol_ptr,
+  uint32_t* out_symbol,
+  uint32_t next_new_symbol_number,
+  const uint32_t max_rules,
+  uint32_t* out_max_scores,
+  uint32_t initial_max_scores,
+  uint8_t max_terminal,
+  uint32_t* new_symbol_number,
+  uint32_t* p_num_rules,
+  uint32_t* p_first_define_index,
+  float* p_prior_min_score
+) {
+  *out_max_scores = initial_max_scores;
+  uint32_t max_run_length[0x100]; /* longest equal-symbol run per terminal; scan_mode==1 dedup pass only */
+  uint32_t run_length = 0;
+  uint32_t prior_symbol = 0xFFFFFFFE;
+  memset(max_run_length, 0, 0x400);
+  uint32_t* in_symbol_ptr = start_symbol_ptr;
+  uint32_t symbol;
+  do {
+    symbol = *in_symbol_ptr++;
+    if (symbol == prior_symbol)
+      run_length++;
+    else {
+      if (run_length != 0 && run_length > max_run_length[prior_symbol]) {
+        max_run_length[prior_symbol] = run_length;
+      }
+      run_length = 0;
+      prior_symbol = symbol <= max_terminal ? symbol : 0xFFFFFFFE;
+    }
+  } while (in_symbol_ptr != end_symbol_ptr);
+  in_symbol_ptr = start_symbol_ptr;
+  if ((run_length != 0) && (run_length > max_run_length[prior_symbol])) {
+    max_run_length[prior_symbol] = run_length;
+  }
+
+  uint8_t found_run = 0;
+  for (size_t i = 0 ; i <= max_terminal ; i++) {
+    if ((max_run_length[i] >= 63) && (next_new_symbol_number < max_rules)) {
+      max_run_length[i] = 1 << (uint32_t)log2(sqrt((double)max_run_length[i] + 1.5));
+      symbol_counts[next_new_symbol_number] = 0;
+      new_symbol_number[i] = next_new_symbol_number++;
+      found_run = 1;
+    } else
+      max_run_length[i] = 0;
+  }
+
+  if (found_run != 0) {
+#ifdef PRINTON
+    if (fast_mode == 0)
+      fprintf(stderr, "Deduplicating runs\n");
+#endif
+    run_length = 0;
+    uint32_t* out_symbol_ptr = start_symbol_ptr;
+    prior_symbol = *in_symbol_ptr;
+    while (in_symbol_ptr++ != end_symbol_ptr) {
+      symbol = *in_symbol_ptr;
+      if ((symbol == prior_symbol) && (symbol <= max_terminal)) {
+        if (++run_length == max_run_length[symbol] - 1) {
+          prior_symbol = new_symbol_number[symbol];
+          run_length = 0;
+          symbol_counts[new_symbol_number[symbol]]++;
+        }
+      } else {
+        *out_symbol_ptr++ = prior_symbol;
+        while (run_length != 0) {
+          *out_symbol_ptr++ = prior_symbol;
+          run_length--;
+        }
+        prior_symbol = symbol;
+      }
+    }
+
+    uint32_t num_rules = *p_num_rules;
+    uint32_t first_define_index = *p_first_define_index;
+    if (num_rules == 0)
+      first_define_index = out_symbol_ptr - start_symbol_ptr;
+    else {
+      if (out_symbol_ptr < start_symbol_ptr + first_define_index)
+        first_define_index = out_symbol_ptr - start_symbol_ptr;
+      if (*(start_symbol_ptr + first_define_index) != 0x80000001) // decrement index until found
+        while (*(start_symbol_ptr + --first_define_index) != 0x80000001);
+    }
+
+    // Add the new symbol definitions to the end of the data
+    for (size_t i = 0 ; i <= max_terminal ; i++) {
+      if (max_run_length[i] != 0) {
+        *out_symbol_ptr++ = 0x80000001 + num_rules;
+        uint32_t j = 0;
+        while (j++ != max_run_length[i])
+          *out_symbol_ptr++ = i;
+        symbol_counts[i] -= max_run_length[i] * (symbol_counts[new_symbol_number[i]] - 1);
+        o1c[i][i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
+        num_ends[i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
+        num_starts[i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
+        symbol_ends[num_terminals + num_rules].start = i;
+        symbol_ends[num_terminals + num_rules++].end = i;
+      }
+    }
+    end_symbol_ptr = out_symbol_ptr;
+    *end_symbol_ptr = 0xFFFFFFFE;
+    num_file_symbols = end_symbol_ptr - start_symbol_ptr;
+    if (fast_mode == 0)
+      min_score = 10.0;
+    else
+      min_score = 40.0;
+    *p_prior_min_score = BIG_FLOAT;
+    *p_num_rules = num_rules;
+    *p_first_define_index = first_define_index;
+  }
+
+  *out_in_symbol_ptr = in_symbol_ptr;
+  *out_symbol = symbol;
+  return found_run;
+}
+
 void main_loop(
   uint32_t* p_num_rules,
   uint8_t scan_mode, /* phase state: 0=word pass, 1=run dedup, 2=general scan, 3=retry w/ lower min_score;
@@ -3412,8 +3529,8 @@ void main_loop(
   uint32_t num_rules = *p_num_rules;
   uint16_t scan_cycle = *p_scan_cycle;
 
+  num_candidates = 1;
   do {
-top_main_loop:
     uint32_t next_new_symbol_number; /* num_terminals + num_rules; sizes entropy tables and child_ptr_array this pass */
     double d_num_file_symbols;       /* (double)num_file_symbols for scoring ratios */
     uint8_t* free_RAM_ptr;           /* bump pointer into start_symbol_ptr arena after entropy + tree metadata */
@@ -3480,104 +3597,27 @@ top_main_loop:
         &first_define_index,
         &overlap_check_data
       );
-      goto top_main_loop;
+      num_candidates = 1;
+      continue;
     }
 
     if (scan_mode == 1) {
       scan_mode = 2;
-      max_scores = initial_max_scores;
-      uint32_t max_run_length[0x100]; /* longest equal-symbol run per terminal; scan_mode==1 dedup pass only */
-      uint32_t run_length = 0;
-      uint32_t prior_symbol = 0xFFFFFFFE;
-      memset(max_run_length, 0, 0x400);
-      in_symbol_ptr = start_symbol_ptr;
-      do {
-        symbol = *in_symbol_ptr++;
-        if (symbol == prior_symbol)
-          run_length++;
-        else {
-          if (run_length != 0 && run_length > max_run_length[prior_symbol]) {
-            max_run_length[prior_symbol] = run_length;
-          }
-          run_length = 0;
-          prior_symbol = symbol <= max_terminal ? symbol : 0xFFFFFFFE;
-        }
-      } while (in_symbol_ptr != end_symbol_ptr);
-      in_symbol_ptr = start_symbol_ptr;
-      if ((run_length != 0) && (run_length > max_run_length[prior_symbol])) {
-        max_run_length[prior_symbol] = run_length;
-      }
-
-      uint8_t found_run = 0;
-      for (size_t i = 0 ; i <= max_terminal ; i++) {
-        if ((max_run_length[i] >= 63) && (next_new_symbol_number < max_rules)) {
-          max_run_length[i] = 1 << (uint32_t)log2(sqrt((double)max_run_length[i] + 1.5));
-          symbol_counts[next_new_symbol_number] = 0;
-          new_symbol_number[i] = next_new_symbol_number++;
-          found_run = 1;
-        } else
-          max_run_length[i] = 0;
-      }
-
-      if (found_run != 0) {
-#ifdef PRINTON
-        if (fast_mode == 0)
-          fprintf(stderr, "Deduplicating runs\n");
-#endif
-        run_length = 0;
-        out_symbol_ptr = start_symbol_ptr;
-        prior_symbol = *in_symbol_ptr;
-        while (in_symbol_ptr++ != end_symbol_ptr) {
-          symbol = *in_symbol_ptr;
-          if ((symbol == prior_symbol) && (symbol <= max_terminal)) {
-            if (++run_length == max_run_length[symbol] - 1) {
-              prior_symbol = new_symbol_number[symbol];
-              run_length = 0;
-              symbol_counts[new_symbol_number[symbol]]++;
-            }
-          } else {
-            *out_symbol_ptr++ = prior_symbol;
-            while (run_length != 0) {
-              *out_symbol_ptr++ = prior_symbol;
-              run_length--;
-            }
-            prior_symbol = symbol;
-          }
-        }
-
-        if (num_rules == 0)
-          first_define_index = out_symbol_ptr - start_symbol_ptr;
-        else {
-          if (out_symbol_ptr < start_symbol_ptr + first_define_index)
-            first_define_index = out_symbol_ptr - start_symbol_ptr;
-          if (*(start_symbol_ptr + first_define_index) != 0x80000001) // decrement index until found
-            while (*(start_symbol_ptr + --first_define_index) != 0x80000001);
-        }
-
-        // Add the new symbol definitions to the end of the data
-        for (size_t i = 0 ; i <= max_terminal ; i++) {
-          if (max_run_length[i] != 0) {
-            *out_symbol_ptr++ = 0x80000001 + num_rules;
-            uint32_t j = 0;
-            while (j++ != max_run_length[i])
-              *out_symbol_ptr++ = i;
-            symbol_counts[i] -= max_run_length[i] * (symbol_counts[new_symbol_number[i]] - 1);
-            o1c[i][i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
-            num_ends[i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
-            num_starts[i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
-            symbol_ends[num_terminals + num_rules].start = i;
-            symbol_ends[num_terminals + num_rules++].end = i;
-          }
-        }
-        end_symbol_ptr = out_symbol_ptr;
-        *end_symbol_ptr = 0xFFFFFFFE;
-        num_file_symbols = end_symbol_ptr - start_symbol_ptr;
-        if (fast_mode == 0)
-          min_score = 10.0;
-        else
-          min_score = 40.0;
-        prior_min_score = BIG_FLOAT;
-        goto top_main_loop;
+      if (scan_mode1(
+            &in_symbol_ptr,
+            &symbol,
+            next_new_symbol_number,
+            max_rules,
+            &max_scores,
+            initial_max_scores,
+            max_terminal,
+            new_symbol_number,
+            &num_rules,
+            &first_define_index,
+            &prior_min_score
+          ) != 0) {
+        num_candidates = 1;
+        continue;
       }
     }
 
@@ -3769,8 +3809,9 @@ done_building_tree_tree:
         symbol = *in_symbol_ptr++;
         if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
-          if (next_node_num >= main_nodes_limit)
+          if (next_node_num >= main_nodes_limit) {
             break;
+          }
         }
       } while (in_symbol_ptr != end_cycle_symbol_ptr);
       node_ptrs_num = 0;
@@ -3779,10 +3820,9 @@ done_building_tree_tree:
       i = 0;
       do {
         if (symbol_counts[i] != 0) {
-          if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X)
-            symbol_entropy_f[i] = (float)(log_file_symbols - log2_x[symbol_counts[i]]);
-          else
-            symbol_entropy_f[i] = (float)log_file_symbols - log2f((float)symbol_counts[i]);
+          symbol_entropy_f[i] = symbol_counts[i] < NUM_PRECALCULATED_LOG2_X
+                              ? (float)(log_file_symbols - log2_x[symbol_counts[i]])
+                              : (float)log_file_symbols - log2f((float)symbol_counts[i]);
         }
       } while (++i < next_new_symbol_number);
       rank_scores_data_ptr->max_scores = (uint16_t)max_scores;
@@ -3814,10 +3854,11 @@ done_building_tree_tree:
     prior_cycle_symbols = in_symbol_ptr - start_cycle_symbol_ptr;
 
     if (num_candidates == 0) {
+      if (fast_mode == 0) {
 #ifdef PRINTON
-      if (fast_mode == 0)
         fprintf(stderr, "\r");
 #endif
+      }
       if (scan_mode == 3) {
         if (min_score > 0.0) {
           num_candidates = 1;
@@ -4158,10 +4199,11 @@ done_building_tree_tree:
         }
       }
 
+      if (fast_mode == 0) {
 #ifdef PRINTON
-      if (fast_mode == 0)
         fprintf(stderr, "Overlap search\r");
 #endif
+      }
       block_size = num_file_symbols >> 3;
       block_ptr = start_symbol_ptr + block_size;
       stop_matches_symbol_ptr[0] = block_ptr;
@@ -4187,18 +4229,20 @@ done_building_tree_tree:
           overlap_check_data[i].match_stop_ptr = matches_stop_ptr[i];
           overlap_check_data[i].num_overlaps = num_candidates;
           overlap_check_data[i].match_nodes = match_nodes;
-          if (overlap_check_data[i].stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH < first_define_index)
+          if (overlap_check_data[i].stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH < first_define_index) {
             pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_no_defs_thread,
                (void *)&overlap_check_data[i]);
-          else
+          } else {
             pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_thread, (void *)&overlap_check_data[i]);
+          }
         }
       }
 
       num_overlaps = num_candidates;
       overlap_check_data[0].match_stop_ptr = matches_stop_ptr[0];
-      for (size_t j = 0 ; j < num_candidates ; j++)
+      for (size_t j = 0 ; j < num_candidates ; j++) {
         overlap_check_data[0].next[j] = -1;
+      }
 
       // scan the data, following prefix tree
       uint8_t found_same_score_prior_match;
@@ -4490,8 +4534,9 @@ main_overlap_check_no_defs_loop_match:
         }
         match_node_ptr = match_node_ptr->hit_ptr;
         if (match_node_ptr == 0) {
-          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
             goto main_overlap_check_no_defs_loop_no_match;
+          }
           match_node_ptr = child_ptr_array[symbol];
           goto main_overlap_check_no_defs_loop_match;
         }
@@ -4503,8 +4548,9 @@ main_overlap_check_no_defs_loop_match:
 
 main_overlap_check_loop_end:
       if (stop_symbol_ptr < end_symbol_ptr) {
-        for (size_t i = 1 ; i < 8 ; i++)
+        for (size_t i = 1 ; i < 8 ; i++) {
           pthread_join(overlap_check_threads[i - 1], NULL);
+        }
         if (fast_mode == 1) {
           for (uint16_t candidate_num = 0 ; candidate_num < num_candidates - 1 ; candidate_num++) {
             if (candidate_bad[candidate_num] == 0) {
@@ -4530,20 +4576,18 @@ main_overlap_check_loop_end:
         }
       }
 
-      {
-        for (size_t i = 0, j = next_new_symbol_number; i < num_candidates ; i++) {
-          if (candidate_bad[i] == 0) {
-            symbol_counts[j] = 0;
-            new_rule_number[i] = j++;
-          }
+      
+      for (size_t i = 0, j = next_new_symbol_number; i < num_candidates ; i++) {
+        if (candidate_bad[i] == 0) {
+          symbol_counts[j] = 0;
+          new_rule_number[i] = j++;
         }
       }
+      
 
       in_symbol_ptr = out_symbol_ptr = start_symbol_ptr;
       int32_t prior_match_end = -1;
-      uint8_t max_i = 0;
-      if (stop_symbol_ptr < end_symbol_ptr)
-        max_i = 7;
+      uint8_t max_i = stop_symbol_ptr < end_symbol_ptr ? 7 : 0;
       for (size_t i = 0 ; i <= max_i ; i++) {
         for (size_t j = 0 ; j < (next_match_ptr[i] - next_match_start_ptr[i]) >> 1 ; j++) {
           uint16_t candidate_num = *(next_match_start_ptr[i] + 2 * j);
@@ -4590,9 +4634,9 @@ main_overlap_check_loop_end:
           candidate_bad[i] = 0;
       }
 
-      if (num_rules == 0)
+      if (num_rules == 0) {
         first_define_index = out_symbol_ptr - start_symbol_ptr;
-      else {
+      } else {
         if (out_symbol_ptr < start_symbol_ptr + first_define_index)
           first_define_index = out_symbol_ptr - start_symbol_ptr; 
         if (*(start_symbol_ptr + first_define_index) != 0x80000001)
