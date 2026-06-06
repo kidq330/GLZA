@@ -2116,6 +2116,99 @@ void score_symbol_tree_words(struct node_score_data *rank_scores_buffer, struct 
 }
 
 
+void overlap_check_invalidate_overlap(struct overlap_check *thread_data_ptr, uint8_t *candidate_bad,
+    uint32_t *num_overlaps, uint32_t prior_score, uint32_t node_score_number) {
+  if (fast_mode == 0) {
+    // candidate_bad[std::max(prior_score, node_score_number)] = 1;
+    if (prior_score > node_score_number) {
+      candidate_bad[prior_score] = 1;
+    } else {
+      candidate_bad[node_score_number] = 1;
+    }
+  } else {
+    uint32_t low_score;
+    uint32_t high_score;
+    // auto [low_score, high_score] = std::minmax(prior_score, node_score_number);
+    if (node_score_number < prior_score) {
+      low_score = node_score_number;
+      high_score = prior_score;
+    } else {
+      low_score = prior_score;
+      high_score = node_score_number;
+    }
+
+    int32_t * next_overlap_num_ptr = &thread_data_ptr->next[low_score];
+    while ((*next_overlap_num_ptr != -1) && (thread_data_ptr->second[*next_overlap_num_ptr] < high_score)) {
+      next_overlap_num_ptr = &thread_data_ptr->next[*next_overlap_num_ptr];
+    }
+    if ((*next_overlap_num_ptr == -1) || (thread_data_ptr->second[*next_overlap_num_ptr] != high_score)) {
+      if (*num_overlaps < 150000) {
+        thread_data_ptr->second[*num_overlaps] = high_score;
+        thread_data_ptr->next[*num_overlaps] = *next_overlap_num_ptr;
+        *next_overlap_num_ptr = (*num_overlaps)++;
+      } else {
+        candidate_bad[high_score] = 1;
+      }
+    }
+  }
+}
+
+
+void overlap_check_handle_leaf_match(struct overlap_check *thread_data_ptr, struct match_node *match_node_ptr,
+    uint32_t *in_symbol_ptr, uint8_t *candidate_bad, uint32_t *num_overlaps,
+    uint32_t *prior_match_score_number, uint32_t **prior_match_end_ptr, uint32_t *num_prior_matches) {
+  uint32_t node_score_number = match_node_ptr->score_number;
+  if ((in_symbol_ptr - match_node_ptr->num_symbols < thread_data_ptr->stop_matches_symbol_ptr)
+      && (candidate_bad[node_score_number] == 0)
+      && (*thread_data_ptr->next_match_ptr_ptr + 2 <= thread_data_ptr->match_stop_ptr)) {
+    **thread_data_ptr->next_match_ptr_ptr = node_score_number;
+    (*thread_data_ptr->next_match_ptr_ptr)++;
+    **thread_data_ptr->next_match_ptr_ptr = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
+    (*thread_data_ptr->next_match_ptr_ptr)++;
+  }
+  if ((*num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
+      <= prior_match_end_ptr[*num_prior_matches - 1])) {
+    if (*num_prior_matches == 1) {
+      if (prior_match_score_number[0] != node_score_number) {
+        overlap_check_invalidate_overlap(thread_data_ptr, candidate_bad, num_overlaps,
+            prior_match_score_number[0], node_score_number);
+        prior_match_end_ptr[1] = in_symbol_ptr - 1;
+        prior_match_score_number[1] = node_score_number;
+        *num_prior_matches = 2;
+      }
+    } else {
+      uint32_t prior_match_number = 0;
+      uint8_t found_same_score_prior_match = 0;
+      do {
+        if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
+          (*num_prior_matches)--;
+          for (size_t i = prior_match_number ; i < *num_prior_matches ; i++) {
+            prior_match_end_ptr[i] = prior_match_end_ptr[i + 1];
+            prior_match_score_number[i] = prior_match_score_number[i + 1];
+          }
+        } else { // overlapping candidates - invalidate the lower score
+          if (prior_match_score_number[prior_match_number] == node_score_number) {
+            found_same_score_prior_match = 1;
+          } else {
+            overlap_check_invalidate_overlap(thread_data_ptr, candidate_bad, num_overlaps,
+                prior_match_score_number[prior_match_number], node_score_number);
+          }
+          prior_match_number++;
+        }
+      } while (prior_match_number < *num_prior_matches);
+      if (found_same_score_prior_match == 0) {
+        prior_match_end_ptr[*num_prior_matches] = in_symbol_ptr - 1;
+        prior_match_score_number[(*num_prior_matches)++] = node_score_number;
+      }
+    }
+  } else {
+    *num_prior_matches = 1;
+    prior_match_end_ptr[0] = in_symbol_ptr - 1;
+    prior_match_score_number[0] = node_score_number;
+  }
+}
+
+
 void *overlap_check_thread(void *arg) {
   struct overlap_check * thread_data_ptr = (struct overlap_check *)arg;
   struct match_node * match_nodes = thread_data_ptr->match_nodes;
@@ -2163,110 +2256,14 @@ thread_overlap_check_loop_match:
     goto thread_overlap_check_loop_match;
   }
 
-  // no child, so found a match - check for overlaps
-  uint32_t node_score_number = match_node_ptr->score_number;
-  if ((in_symbol_ptr - match_node_ptr->num_symbols < thread_data_ptr->stop_matches_symbol_ptr)
-      && (candidate_bad[node_score_number] == 0)
-      && (*thread_data_ptr->next_match_ptr_ptr + 2 <= thread_data_ptr->match_stop_ptr)) {
-    **thread_data_ptr->next_match_ptr_ptr = node_score_number;
-    (*thread_data_ptr->next_match_ptr_ptr)++;
-    **thread_data_ptr->next_match_ptr_ptr = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
-    (*thread_data_ptr->next_match_ptr_ptr)++;
-  }
-  if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
-      <= prior_match_end_ptr[num_prior_matches - 1])) {
-    if (num_prior_matches == 1) {
-      if (prior_match_score_number[0] != node_score_number) {
-        if (fast_mode == 0) {
-          if (prior_match_score_number[0] > node_score_number)
-            candidate_bad[prior_match_score_number[0]] = 1;
-          else
-            candidate_bad[node_score_number] = 1;
-        } else {
-          uint32_t low_score, high_score;
-          if (node_score_number < prior_match_score_number[0]) {
-            low_score = node_score_number;
-            high_score = prior_match_score_number[0];
-          } else {
-            low_score = prior_match_score_number[0];
-            high_score = node_score_number;
-          }
-          int32_t * next_overlap_num_ptr = &thread_data_ptr->next[low_score];
-          while ((*next_overlap_num_ptr != -1) && (thread_data_ptr->second[*next_overlap_num_ptr] < high_score))
-            next_overlap_num_ptr = &thread_data_ptr->next[*next_overlap_num_ptr];
-          if ((*next_overlap_num_ptr == -1) || (thread_data_ptr->second[*next_overlap_num_ptr] != high_score)) {
-            if (num_overlaps < 150000) {
-              thread_data_ptr->second[num_overlaps] = high_score;
-              thread_data_ptr->next[num_overlaps] = *next_overlap_num_ptr;
-              *next_overlap_num_ptr = num_overlaps++;
-            } else
-              candidate_bad[high_score] = 1;
-          }
-        }
-        prior_match_end_ptr[1] = in_symbol_ptr - 1;
-        prior_match_score_number[1] = node_score_number;
-        num_prior_matches = 2;
-      }
-    } else {
-      uint32_t prior_match_number = 0;
-      uint8_t found_same_score_prior_match = 0;
-      do {
-        if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
-          num_prior_matches--;
-          uint32_t i;
-          for (i = prior_match_number ; i < num_prior_matches ; i++) {
-            prior_match_end_ptr[i] = prior_match_end_ptr[i + 1];
-            prior_match_score_number[i] = prior_match_score_number[i + 1];
-          }
-        } else { // overlapping candidates - invalidate the lower score
-          if (prior_match_score_number[prior_match_number] == node_score_number)
-            found_same_score_prior_match = 1;
-          else {
-            if (fast_mode == 0) {
-              if (prior_match_score_number[prior_match_number] > node_score_number)
-               candidate_bad[prior_match_score_number[prior_match_number]] = 1;
-              else
-                candidate_bad[node_score_number] = 1;
-            } else {
-              uint32_t low_score, high_score;
-              if (node_score_number < prior_match_score_number[prior_match_number]) {
-                low_score = node_score_number;
-                high_score = prior_match_score_number[prior_match_number];
-              } else {
-                low_score = prior_match_score_number[prior_match_number];
-                high_score = node_score_number;
-              }
-              int32_t * next_overlap_num_ptr = &thread_data_ptr->next[low_score];
-              while ((*next_overlap_num_ptr != -1) && (thread_data_ptr->second[*next_overlap_num_ptr] < high_score))
-                next_overlap_num_ptr = &thread_data_ptr->next[*next_overlap_num_ptr];
-              if ((*next_overlap_num_ptr == -1) || (thread_data_ptr->second[*next_overlap_num_ptr] != high_score)) {
-                if (num_overlaps < 150000) {
-                  thread_data_ptr->second[num_overlaps] = high_score;
-                  thread_data_ptr->next[num_overlaps] = *next_overlap_num_ptr;
-                  *next_overlap_num_ptr = num_overlaps++;
-                } else
-                  candidate_bad[high_score] = 1;
-              }
-            }
-          }
-          prior_match_number++;
-        }
-      } while (prior_match_number < num_prior_matches);
-      if (found_same_score_prior_match == 0) {
-        prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
-        prior_match_score_number[num_prior_matches++] = node_score_number;
-      }
-    }
-  } else {
-    num_prior_matches = 1;
-    prior_match_end_ptr[0] = in_symbol_ptr - 1;
-    prior_match_score_number[0] = node_score_number;
-  }
+  overlap_check_handle_leaf_match(thread_data_ptr, match_node_ptr, in_symbol_ptr, candidate_bad,
+      &num_overlaps, prior_match_score_number, prior_match_end_ptr, &num_prior_matches);
   match_node_ptr = match_node_ptr->hit_ptr;
 
   if (match_node_ptr == 0) {
-    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
       goto thread_overlap_check_loop_no_match;
+    }
     match_node_ptr = child_ptr_array[symbol];
     goto thread_overlap_check_loop_match;
   }
@@ -2327,109 +2324,13 @@ thread_overlap_check_no_defs_loop_match:
     goto thread_overlap_check_no_defs_loop_match;
   }
 
-  // no child, so found a match - check for overlaps
-  uint32_t node_score_number = match_node_ptr->score_number;
-  if ((in_symbol_ptr - match_node_ptr->num_symbols < thread_data_ptr->stop_matches_symbol_ptr)
-      && (candidate_bad[node_score_number] == 0)
-      && (*thread_data_ptr->next_match_ptr_ptr + 2 <= thread_data_ptr->match_stop_ptr)) {
-    **thread_data_ptr->next_match_ptr_ptr = node_score_number;
-    (*thread_data_ptr->next_match_ptr_ptr)++;
-    **thread_data_ptr->next_match_ptr_ptr = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
-    (*thread_data_ptr->next_match_ptr_ptr)++;
-  }
-  if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
-      <= prior_match_end_ptr[num_prior_matches - 1])) {
-    if (num_prior_matches == 1) {
-      if (prior_match_score_number[0] != node_score_number) {
-        if (fast_mode == 0) {
-          if (prior_match_score_number[0] > node_score_number)
-            candidate_bad[prior_match_score_number[0]] = 1;
-          else
-            candidate_bad[node_score_number] = 1;
-        } else {
-          uint32_t low_score, high_score;
-          if (node_score_number < prior_match_score_number[0]) {
-            low_score = node_score_number;
-            high_score = prior_match_score_number[0];
-          } else {
-            low_score = prior_match_score_number[0];
-            high_score = node_score_number;
-          }
-          int32_t * next_overlap_num_ptr = &thread_data_ptr->next[low_score];
-          while ((*next_overlap_num_ptr != -1) && (thread_data_ptr->second[*next_overlap_num_ptr] < high_score))
-            next_overlap_num_ptr = &thread_data_ptr->next[*next_overlap_num_ptr];
-          if ((*next_overlap_num_ptr == -1) || (thread_data_ptr->second[*next_overlap_num_ptr] != high_score)) {
-            if (num_overlaps < 150000) {
-              thread_data_ptr->second[num_overlaps] = high_score;
-              thread_data_ptr->next[num_overlaps] = *next_overlap_num_ptr;
-              *next_overlap_num_ptr = num_overlaps++;
-            } else
-              candidate_bad[high_score] = 1;
-          }
-        }
-        prior_match_end_ptr[1] = in_symbol_ptr - 1;
-        prior_match_score_number[1] = node_score_number;
-        num_prior_matches = 2;
-      }
-    } else {
-      uint32_t prior_match_number = 0;
-      uint8_t found_same_score_prior_match = 0;
-      do {
-        if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
-          num_prior_matches--;
-          uint32_t i;
-          for (i = prior_match_number ; i < num_prior_matches ; i++) {
-            prior_match_end_ptr[i] = prior_match_end_ptr[i + 1];
-            prior_match_score_number[i] = prior_match_score_number[i + 1];
-          }
-        } else { // overlapping candidates - invalidate the lower score
-          if (prior_match_score_number[prior_match_number] == node_score_number)
-            found_same_score_prior_match = 1;
-          else {
-            if (fast_mode == 0) {
-              if (prior_match_score_number[prior_match_number] > node_score_number)
-                candidate_bad[prior_match_score_number[prior_match_number]] = 1;
-              else
-               candidate_bad[node_score_number] = 1;
-            } else {
-              uint32_t low_score, high_score;
-              if (node_score_number < prior_match_score_number[prior_match_number]) {
-                low_score = node_score_number;
-                high_score = prior_match_score_number[prior_match_number];
-              } else {
-                low_score = prior_match_score_number[prior_match_number];
-                high_score = node_score_number;
-              }
-              int32_t * next_overlap_num_ptr = &thread_data_ptr->next[low_score];
-              while ((*next_overlap_num_ptr != -1) && (thread_data_ptr->second[*next_overlap_num_ptr] < high_score))
-                next_overlap_num_ptr = &thread_data_ptr->next[*next_overlap_num_ptr];
-              if ((*next_overlap_num_ptr == -1) || (thread_data_ptr->second[*next_overlap_num_ptr] != high_score)) {
-                if (num_overlaps < 150000) {
-                  thread_data_ptr->second[num_overlaps] = high_score;
-                  thread_data_ptr->next[num_overlaps] = *next_overlap_num_ptr;
-                  *next_overlap_num_ptr = num_overlaps++;
-                } else
-                  candidate_bad[high_score] = 1;
-              }
-            }
-          }
-          prior_match_number++;
-        }
-      } while (prior_match_number < num_prior_matches);
-      if (found_same_score_prior_match == 0) {
-        prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
-        prior_match_score_number[num_prior_matches++] = node_score_number;
-      }
-    }
-  } else {
-    num_prior_matches = 1;
-    prior_match_end_ptr[0] = in_symbol_ptr - 1;
-    prior_match_score_number[0] = node_score_number;
-  }
+  overlap_check_handle_leaf_match(thread_data_ptr, match_node_ptr, in_symbol_ptr, candidate_bad,
+      &num_overlaps, prior_match_score_number, prior_match_end_ptr, &num_prior_matches);
   match_node_ptr = match_node_ptr->hit_ptr;
   if (match_node_ptr == 0) {
-    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
       goto thread_overlap_check_no_defs_loop_no_match;
+    }
     match_node_ptr = child_ptr_array[symbol];
     goto thread_overlap_check_no_defs_loop_match;
   }
@@ -4735,6 +4636,54 @@ main_overlap_check_loop_end:
   *p_symbol = symbol;
 }
 
+uint8_t update_min_max_scores(
+  uint32_t *ptr_max_scores,
+  float *ptr_min_score,
+  float prior_min_score,
+  uint16_t num_candidates,
+  uint32_t num_rules,
+  uint32_t next_new_symbol_number,
+  uint32_t initial_max_scores,
+  float fast_min_score,
+  uint8_t fast_sections
+) {
+  uint32_t max_scores = *ptr_max_scores;
+  uint32_t min_score = *ptr_min_score;
+
+  if (fast_mode == 0) {
+    uint32_t prior_max_scores = max_scores;
+    // __jm__ how the hell does this work? why divide by 3???
+    max_scores = (max_scores
+        + 2 * (num_terminals + num_rules - next_new_symbol_number + initial_max_scores)) / 3;
+    if (max_scores > MAX_SCORES) {
+      max_scores = MAX_SCORES;
+    }
+    if (max_scores > prior_max_scores) {
+      // __jm__ wtf?
+      min_score -= (prior_min_score - min_score) * 25.0 * (double)(max_scores - prior_max_scores) / (double)prior_max_scores;
+    }
+    if (min_score < 0.0) {
+      min_score = 0.0;
+    }
+  } else {
+    if ((prior_min_score <= fast_min_score) && (fast_sections == 1)) {
+      return 1;
+    }
+    max_scores = (20 * max_scores
+        + 35 * (num_terminals + num_rules - next_new_symbol_number + initial_max_scores)) >> 6;
+    if (max_scores > MAX_SCORES_FAST) {
+      max_scores = MAX_SCORES_FAST;
+    }
+  }
+  if (max_scores > 100 * num_candidates) {
+    max_scores = 100 * num_candidates;
+  }
+
+  *ptr_max_scores = max_scores;
+  *ptr_min_score = min_score;
+  return 0;
+}
+
 void main_loop(
   uint32_t* p_num_rules,
   enum glza_scan_mode scan_mode,
@@ -4792,8 +4741,7 @@ void main_loop(
   float log2_num_symbols_plus_substitution_cost; /* log2(n)+1.4; set in main_loop_init for GLZA_SCAN_WORDS or fast_mode==1 */
   float production_cost;          /* per-production overhead; same init branch as log2_num_symbols_plus_substitution_cost */
   size_t block_size;              /* num_file_symbols >> 3; overlap-check thread block stride */
-  size_t i;                       /* fast-mode section rotation; also used in overlap/substitution loops */
-  double order_0_entropy;         /* fast_mode==0 min_score input for scan_mode0(); BUG: never assigned before that call */
+  double order_0_entropy;         /* fast_mode==0 min_score input for scan_mode0() */
   float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS]; /* repeat-cost table; filled for GLZA_SCAN_WORDS or fast_mode==1 */
   struct tree_thread_data tree_thread_data[13]; /* parallel suffix-tree builders; 12 threads if fast_mode==0 else 13 */
 
@@ -4980,27 +4928,19 @@ void main_loop(
     }
 
 
-
-    if (fast_mode == 0) {
-      uint32_t prior_max_scores = max_scores;
-      max_scores = (max_scores
-          + 2 * (num_terminals + num_rules - next_new_symbol_number + initial_max_scores)) / 3;
-      if (max_scores > MAX_SCORES)
-        max_scores = MAX_SCORES;
-      if (max_scores > prior_max_scores)
-        min_score -= (prior_min_score - min_score) * 25.0 * (double)(max_scores - prior_max_scores) / (double)prior_max_scores;
-      if (min_score < 0.0)
-        min_score = 0.0;
-    } else {
-      if ((prior_min_score <= fast_min_score) && (fast_sections == 1))
-        break;
-      max_scores = (20 * max_scores
-          + 35 * (num_terminals + num_rules - next_new_symbol_number + initial_max_scores)) >> 6;
-      if (max_scores > MAX_SCORES_FAST)
-        max_scores = MAX_SCORES_FAST;
+    if (update_min_max_scores(
+      &max_scores,
+      &min_score,
+      prior_min_score,
+      num_candidates,
+      num_rules,
+      next_new_symbol_number,
+      initial_max_scores,
+      fast_min_score,
+      fast_sections
+    ) != 0) {
+      break;
     }
-    if (max_scores > 100 * num_candidates)
-      max_scores = 100 * num_candidates;
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
 
   // __jm__ mutate results
