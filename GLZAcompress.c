@@ -24,6 +24,7 @@ limitations under the License.
 //     4. Replaces each occurence of the best strings with a rule symbol and adds the rule number followed by the rule
 //        right hand side to the end of the data
 
+#include <assert.h>
 #include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
@@ -2843,7 +2844,7 @@ static void scan_mode0(
   uint32_t* out_next_node_num,
   uint32_t** out_in_symbol_ptr,
   uint8_t UTF8_compliant,
-  uint32_t node_num_limit,
+  uint32_t node_num_limit, // limit on the size (# of nodes) of the GST
   float* symbol_entropy_f,
   uint32_t* p_next_new_symbol_number,
   uint16_t* out_node_ptrs_num,
@@ -2883,8 +2884,7 @@ static void scan_mode0(
     *base_node_child_num_ptr++ = 0;
   }
 
-  uint32_t next_node_num = 1;
-  uint32_t* in_symbol_ptr = start_symbol_ptr;
+  uint32_t next_node_num = 1; // Supposed to track the size of the GST
   uint8_t word_start[0x80]; /* ASCII-ish set marking symbols that may start a word after space (0x20) */
   for (size_t i = 0 ; i < 0x80 ; i++) {
     word_start[i] = 0;
@@ -2897,24 +2897,33 @@ static void scan_mode0(
   }
   word_start['$'] = 1;
 
-  uint32_t symbol;
-  while (1) {
-    if (in_symbol_ptr >= end_symbol_ptr) {
-      break;
-    }
-    symbol = *in_symbol_ptr++;
-    if (symbol == 0x20) {
-      if (in_symbol_ptr < end_symbol_ptr && (int32_t)*in_symbol_ptr >= 0
-          && (((*in_symbol_ptr >= 0x80) && (UTF8_compliant != 0))
-          || ((*in_symbol_ptr < 0x80) && (word_start[*in_symbol_ptr] != 0)))) {
-        if (next_node_num < node_num_limit - 10) {
-          add_word_suffix(in_symbol_ptr, &next_node_num);
-        }
+  uint32_t* in_symbol_ptr = start_symbol_ptr; // cursor over current compressed input
+  {
+    uint32_t symbol;
+    while (in_symbol_ptr < end_symbol_ptr) {
+      symbol = *in_symbol_ptr++;
+      assert(symbol != 0xFFFFFFFE && "compressed input must not contain EOF sentinel");
+      if (symbol != ' ' || in_symbol_ptr == end_symbol_ptr) {
+        continue;
       }
-    } else if (symbol == 0xFFFFFFFE) {
-      in_symbol_ptr--;
-      break; // exit loop on EOF
+      uint32_t next_symbol = *in_symbol_ptr;
+      if ((int32_t)next_symbol < 0) {
+        // "negative" stream values are rule-define markers (0x80000001 + n) and other reserved special values
+        continue;
+      }
+      uint8_t does_next_symbol_start_word = (
+        // for UTF-8, heuristically assume high bytes start word
+        (next_symbol >= 0x80 && UTF8_compliant == 1)
+        // otherwise use `word_start` lookup
+        || (next_symbol < 0x80 && word_start[next_symbol] != 0)
+      );
+      // we stop adding words once we're this many nodes away from `node_num_limit`
+      const uint8_t GST_RESERVED_NODES_THRESHOLD = 10;
+      if (does_next_symbol_start_word && next_node_num + GST_RESERVED_NODES_THRESHOLD < node_num_limit) {
+        add_word_suffix(in_symbol_ptr, &next_node_num);
+      }
     }
+    // in_symbol_ptr < end_symbol_ptr || symbol == EOF
   }
   *out_next_node_num = next_node_num;
 
@@ -3085,7 +3094,7 @@ static void scan_mode0(
             }
             struct match_node* match_node_ptr = match_nodes;
             while (best_score_match_ptr <= best_score_last_match_ptr) {
-              symbol = *best_score_match_ptr;
+              uint32_t symbol = *best_score_match_ptr;
               if (match_node_ptr->child_ptr == 0) {
                 if (num_match_nodes >= match_nodes_limit) {
                   candidate_bad[candidate_num] = 1;
@@ -3134,7 +3143,7 @@ static void scan_mode0(
             best_score_match_ptr = match_strings + (candidate_num * max_match_length);
             best_score_last_match_ptr = best_score_match_ptr + candidates[candidates_index[candidate_num]].num_symbols - 1;
             best_score_match_ptr++;
-            symbol = *best_score_match_ptr++;
+            uint32_t symbol = *best_score_match_ptr++;
             uint32_t best_score_num_symbols = 2;
             struct match_node* match_node_ptr = move_to_base_match_child_with_make(match_nodes, symbol, j, &num_match_nodes,
                 &child_ptr_array[0]);
@@ -3207,7 +3216,7 @@ static void scan_mode0(
 
 wmain_symbol_substitution_loop_top:
       if (*in_symbol_ptr++ == 0x20) {
-        symbol = *in_symbol_ptr++;
+        uint32_t symbol = *in_symbol_ptr++;
         if ((int32_t)symbol < 0) {
           if (in_symbol_ptr < stop_symbol_ptr) {
             goto wmain_symbol_substitution_loop_top;
@@ -3438,7 +3447,6 @@ wmain_symbol_substitution_loop_end2:
 
 static uint8_t scan_mode1(
   uint32_t** out_in_symbol_ptr,
-  uint32_t* out_symbol,
   uint32_t next_new_symbol_number,
   const uint32_t max_rules,
   uint32_t* out_max_scores,
@@ -3550,13 +3558,11 @@ static uint8_t scan_mode1(
   }
 
   *out_in_symbol_ptr = in_symbol_ptr;
-  *out_symbol = symbol;
   return found_run;
 }
 
 static void build_and_score_suffix_tree(
   uint32_t** out_in_symbol_ptr,
-  uint32_t* out_symbol,
   uint32_t* out_next_node_num,
   uint16_t* out_node_ptrs_num,
   float* out_cycle_end_ratio,
@@ -3805,7 +3811,6 @@ done_building_tree_tree:
   }
 
   *out_in_symbol_ptr = in_symbol_ptr;
-  *out_symbol = symbol;
   *out_next_node_num = next_node_num;
   *out_node_ptrs_num = node_ptrs_num;
 }
@@ -3861,7 +3866,6 @@ static void process_ranked_candidates(
   uint32_t *p_num_rules,
   uint32_t *p_first_define_index,
   uint32_t **p_in_symbol_ptr,
-  uint32_t *p_symbol,
   const uint16_t *candidates_index,
   uint8_t *candidate_bad,
   uint8_t *end_RAM_ptr,
@@ -3896,7 +3900,7 @@ static void process_ranked_candidates(
   float prior_min_score = *p_prior_min_score;
   float fast_min_score = *p_fast_min_score;
   float new_min_score = *p_new_min_score;
-  uint32_t symbol = *p_symbol;
+  uint32_t symbol;
 
   pthread_t overlap_check_threads[7];
   uint32_t new_rule_number[0x8000];
@@ -4197,8 +4201,10 @@ static void process_ranked_candidates(
               } else if (match_node_ptr->child_ptr->miss_ptr == 0) {
                 write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, search_node_ptr->child_ptr);
               }
-              if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
+              if (search_node_ptr->child_ptr == 0) {
+                // no child, so done with this suffix
                 break;
+              }
               search_node_ptr = search_node_ptr->child_ptr;
             }
           }
@@ -4860,7 +4866,6 @@ main_overlap_check_loop_end:
   *p_prior_min_score = prior_min_score;
   *p_fast_min_score = fast_min_score;
   *p_new_min_score = new_min_score;
-  *p_symbol = symbol;
 }
 
 static uint8_t update_min_max_scores(
@@ -4914,33 +4919,28 @@ static uint8_t update_min_max_scores(
 static void main_loop(
   uint32_t* p_num_rules,
   enum glza_scan_mode scan_mode,
-  uint32_t num_terminals_used,
+  const uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
   uint32_t** p_in_symbol_ptr,
-  uint8_t UTF8_compliant,
+  const uint8_t UTF8_compliant,
   struct rank_scores_thread_data *rank_scores_data_ptr,
   uint32_t max_scores,
   struct score_data *node_data,
-  uint32_t prior_cycle_symbols,
   const uint32_t max_rules,
   uint16_t *candidates_index,
   uint8_t *candidate_bad,
   uint32_t first_define_index,
-  uint32_t initial_max_scores,
-  uint8_t max_terminal,
+  const uint32_t initial_max_scores,
+  const uint8_t max_terminal,
   uint32_t *new_symbol_number,
-  float prior_min_score,
-  float cycle_start_ratio,
-  float cycle_end_ratio,
   uint8_t fast_section,
   uint8_t fast_sections,
-  double profit_ratio_power,
+  const double profit_ratio_power,
   float fast_min_score,
   float section_scores[23],
   uint8_t section_repeats,
   uint16_t* p_scan_cycle
 ) {
-  uint32_t symbol;              /* current symbol while scanning/building trees */
   uint32_t num_match_nodes;     /* allocated prefix-tree nodes this sub-pass; checked vs match_nodes_limit */
   uint32_t next_node_num;       /* next free suffix-tree node slot; checked vs main_nodes_limit / node_num_limit */
   uint32_t max_match_length;    /* longest candidate string this pass; sizes match_strings[num_candidates * max_match_length] */
@@ -4957,6 +4957,10 @@ static void main_loop(
   float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS]; /* repeat-cost table; filled for GLZA_SCAN_WORDS or fast_mode==1 */
   struct tree_thread_data tree_thread_data[13]; /* parallel suffix-tree builders; 12 threads if fast_mode==0 else 13 */
 
+  uint32_t prior_cycle_symbols = num_file_symbols;
+  float prior_min_score = BIG_FLOAT;
+  float cycle_start_ratio = 0.0;
+  float cycle_end_ratio = 1.0;
   size_t substitute_heap_size = 0; /* bytes allocated for substitute_heap_buf; only when num_file_symbols >= 1M */
   
   uint8_t *substitute_heap_buf = NULL; /* optional 0x800000/0x1000000 heap when grammar >= 1M symbols */
@@ -5048,7 +5052,6 @@ static void main_loop(
       scan_mode = GLZA_SCAN_GENERAL;
       if (scan_mode1(
             &in_symbol_ptr,
-            &symbol,
             next_new_symbol_number,
             max_rules,
             &max_scores,
@@ -5070,7 +5073,6 @@ static void main_loop(
 
     build_and_score_suffix_tree(
       &in_symbol_ptr,
-      &symbol,
       &next_node_num,
       &node_ptrs_num,
       &cycle_end_ratio,
@@ -5116,7 +5118,6 @@ static void main_loop(
         &num_rules,
         &first_define_index,
         &in_symbol_ptr,
-        &symbol,
         candidates_index,
         candidate_bad,
         end_RAM_ptr,
@@ -5474,7 +5475,6 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     rank_scores_data_ptr,
     max_scores,
     node_data,
-    num_file_symbols,
     max_rules,
     candidates_index,
     candidate_bad,
@@ -5482,9 +5482,6 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     initial_max_scores,
     max_terminal,
     new_symbol_number,
-    BIG_FLOAT,
-    0.0,
-    1.0,
     fast_section,
     fast_sections,
     profit_ratio_power,
