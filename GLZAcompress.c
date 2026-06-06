@@ -47,6 +47,13 @@ const uint32_t MAX_SCORES_FAST = 0x7FFF;
 const uint32_t NODE_DATA_STACK_DEPTH = MAX_MATCH_LENGTH + 32;
 const float BIG_FLOAT = 1000000000.0;
 
+enum glza_scan_mode {
+  GLZA_SCAN_WORDS = 0,      /* word suffix-tree pass */
+  GLZA_SCAN_RUN_DEDUP = 1,  /* one-shot run deduplication */
+  GLZA_SCAN_GENERAL = 2,    /* full suffix-tree scan */
+  GLZA_SCAN_RETRY = 3,      /* retry with lower min_score (fast-mode sections) */
+};
+
 uint32_t num_file_symbols; /* grammar stream length in uint32_t symbols (includes rule markers) */
 uint32_t num_terminals;    /* alphabet size: UTF-8 code points or 0x100 raw bytes */
 uint32_t *start_symbol_ptr; /* base of in-RAM grammar stream; also bump-allocator arena base */
@@ -2661,7 +2668,7 @@ void main_loop_init(
   uint8_t** out_free_RAM_ptr,
   double** out_symbol_entropy,
   float** out_symbol_entropy_f,
-  uint8_t scan_mode,
+  enum glza_scan_mode scan_mode,
   float* ptr_log2_num_symbols_plus_substitution_cost,
   float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS],
   float* ptr_production_cost,
@@ -2681,10 +2688,10 @@ void main_loop_init(
   double* symbol_entropy = (double *)free_RAM_ptr;
   float* symbol_entropy_f = (float *)free_RAM_ptr;
 
-  /* scan_mode==0 (word pass): reserve one float table; scan_mode!=0 && fast_mode==0: reserve two. */
-  free_RAM_ptr += (1 + ((scan_mode != 0) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
-  if ((scan_mode != 0) && (fast_mode == 0)) {
-    /* slow path once past word pass (scan_mode>=1): NFS profit tables */
+  /* GLZA_SCAN_WORDS: reserve one float table; later slow-path passes reserve two. */
+  free_RAM_ptr += (1 + ((scan_mode != GLZA_SCAN_WORDS) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
+  if ((scan_mode != GLZA_SCAN_WORDS) && (fast_mode == 0)) {
+    /* slow path once past word pass: NFS profit tables */
     num_file_symbols_p1_x_log_file_symbols_p1 = xlogx(num_file_symbols + 1);
     for (size_t i = 1; i < NUM_PRECALCULATED_NFSMR_LOGS; i++) {
       double tmp = num_file_symbols - i + 1;
@@ -2698,7 +2705,7 @@ void main_loop_init(
     for (size_t i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++) {
       new_symbol_cost[i] = log2_num_symbols_plus_substitution_cost - (float)log2_x[i - 1]; // -1 for repeats only
     }
-    *ptr_production_cost = scan_mode == 0
+    *ptr_production_cost = scan_mode == GLZA_SCAN_WORDS
                     ? log2f((float)d_num_file_symbols / (float)num_terminals_used) + 1.2
                     : log2f((float)d_num_file_symbols / (float)(num_rules + 1)) + 1.2;
     *ptr_log2_num_symbols_plus_substitution_cost = log2_num_symbols_plus_substitution_cost;
@@ -2719,7 +2726,7 @@ void main_loop_init(
         }
       } while (++i < next_new_symbol_number);
     }
-    if (scan_mode == 0) {
+    if (scan_mode == GLZA_SCAN_WORDS) {
       /* word pass only: mirror double entropies into symbol_entropy_f for score_symbol_tree_words */
       size_t i = 0;
       do {
@@ -3446,10 +3453,265 @@ uint8_t scan_mode1(
   return found_run;
 }
 
+void build_and_score_suffix_tree(
+  uint32_t** out_in_symbol_ptr,
+  uint32_t* out_symbol,
+  uint32_t* out_next_node_num,
+  uint16_t* out_node_ptrs_num,
+  float* out_cycle_end_ratio,
+  uint32_t* start_cycle_symbol_ptr,
+  uint32_t node_num_limit,
+  uint32_t next_new_symbol_number,
+  uint32_t num_rules,
+  uint32_t max_scores,
+  float cycle_start_ratio,
+  uint8_t fast_section,
+  uint8_t fast_sections,
+  double* symbol_entropy,
+  float* symbol_entropy_f,
+  double profit_ratio_power,
+  float production_cost,
+  float log2_num_symbols_plus_substitution_cost,
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS],
+  struct rank_scores_thread_data* rank_scores_data_ptr,
+  struct score_data* node_data,
+  struct tree_thread_data tree_thread_data[13],
+  pthread_t build_tree_threads[7],
+  pthread_t* rank_scores_thread1
+) {
+  uint32_t main_max_symbol;   /* highest symbol id handled by main (non-worker) suffix-tree builder this pass */
+  uint32_t main_nodes_limit;  /* node budget for main thread; fast_mode==0: 18% of nodes; fast_mode==1: 6% */
+  size_t i = 1;
+  uint32_t nodes_div_100 = node_num_limit / 100;
+  uint32_t* end_cycle_symbol_ptr;   /* fast_mode==1 only: end of current fast_section slice */
+  uint32_t* in_symbol_ptr = *out_in_symbol_ptr;
+  uint32_t next_node_num = 1;
+  uint32_t symbol;
+  if (fast_mode == 0) {
+    // NOLINTBEGIN(readability-magic-numbers)
+    uint8_t thread_symbol_limit[] = {
+          5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
+    };
+    uint32_t thread_first_node_num[] = {
+      18 * nodes_div_100,
+      31 * nodes_div_100,
+      43 * nodes_div_100,
+      56 * nodes_div_100,
+      70 * nodes_div_100,
+      85 * nodes_div_100,
+      1,
+      16 * nodes_div_100,
+      31 * nodes_div_100,
+      43 * nodes_div_100,
+      56 * nodes_div_100,
+      70 * nodes_div_100
+    };
+    uint32_t thread_nodes_limit[] = {
+      31 * nodes_div_100,
+      43 * nodes_div_100,
+      56 * nodes_div_100,
+      70 * nodes_div_100,
+      85 * nodes_div_100,
+      node_num_limit,
+      16 * nodes_div_100,
+      31 * nodes_div_100,
+      43 * nodes_div_100,
+      56 * nodes_div_100,
+      70 * nodes_div_100,
+      85 * nodes_div_100
+    };
+    main_nodes_limit = (nodes_div_100 * 18) - 10;
+    // NOLINTEND(readability-magic-numbers)
+    main_max_symbol = stca_setup(
+        fast_mode,
+        12,
+        thread_symbol_limit,
+        thread_first_node_num,
+        thread_nodes_limit,
+        node_num_limit,
+        num_rules,
+        next_new_symbol_number,
+        tree_thread_data,
+        start_cycle_symbol_ptr
+    );
+
+    scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
+    max_symbol_ptr = 0;
+    for (size_t j = 0 ; j < 6 ; j++) {
+      pthread_create(&build_tree_threads[j], NULL, build_tree_thread, (void *)&tree_thread_data[j]);
+    }
+  } else {
+    // NOLINTBEGIN(readability-magic-numbers)
+    uint8_t thread_symbol_limit[] = {
+      6, 12, 19, 26, 34, 43, 54, 67, 73, 79, 85, 90, 95
+    };
+    uint32_t thread_first_node_num[] = {
+      6 * nodes_div_100,
+       12 * nodes_div_100,
+       22 * nodes_div_100,
+       34 * nodes_div_100,
+       48 * nodes_div_100,
+       64 * nodes_div_100,
+       81 * nodes_div_100,
+       1,
+       12 * nodes_div_100,
+       22 * nodes_div_100,
+       34 * nodes_div_100,
+       48 * nodes_div_100,
+       64 * nodes_div_100
+    };
+    uint32_t thread_nodes_limit[] = {
+      12 * nodes_div_100,
+       22 * nodes_div_100,
+       34 * nodes_div_100,
+       48 * nodes_div_100,
+       64 * nodes_div_100,
+       81 * nodes_div_100,
+       node_num_limit,
+       12 * nodes_div_100,
+       22 * nodes_div_100,
+       34 * nodes_div_100,
+       48 * nodes_div_100,
+       64 * nodes_div_100,
+       81 * nodes_div_100
+    };
+    main_nodes_limit = (nodes_div_100 * 6) - 10;
+    // NOLINTEND(readability-magic-numbers)
+    main_max_symbol = stca_setup(
+        fast_mode,
+        13,
+        thread_symbol_limit,
+        thread_first_node_num,
+        thread_nodes_limit,
+        node_num_limit,
+        num_rules,
+        next_new_symbol_number,
+        tree_thread_data,
+        start_cycle_symbol_ptr
+    );
+
+    end_cycle_symbol_ptr = fast_section == fast_sections - 1 /* fast_mode==1 only */
+                         ? end_symbol_ptr
+                         : start_symbol_ptr + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
+
+    atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_relaxed);
+    atomic_store_explicit(&max_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_release);
+    for (size_t j = 0 ; j < 7 ; j++) {
+      pthread_create(&build_tree_threads[j], NULL, build_tree_thread, (void *)&tree_thread_data[j]);
+    }
+  }
+  memset(base_nodes_child_node_num, 0, 4 * (main_max_symbol + 1) * BASE_NODES_CHILD_ARRAY_SIZE);
+
+  uint16_t node_ptrs_num;
+  if (fast_mode == 0) {
+    do {
+      symbol = *in_symbol_ptr++;
+      if (symbol <= main_max_symbol) {
+        atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_relaxed);
+        if ((int32_t)*in_symbol_ptr >= 0) {
+          add_suffix(symbol, in_symbol_ptr, &next_node_num);
+          if (next_node_num >= main_nodes_limit)
+            goto done_building_tree_tree;
+        }
+      }
+    } while (symbol != 0xFFFFFFFE);
+    in_symbol_ptr--;
+done_building_tree_tree:
+    atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_relaxed);
+    atomic_store_explicit(&max_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_release);
+    node_ptrs_num = 0;
+    atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
+    atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
+#ifdef PRINTON
+    fprintf(stderr, ".");
+#endif
+    rank_scores_data_ptr->max_scores = (uint16_t)max_scores;
+
+    pthread_create(rank_scores_thread1, NULL, rank_scores_thread, (void *)rank_scores_data_ptr);
+    score_symbol_tree(0, main_max_symbol, rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num,
+        profit_ratio_power, symbol_entropy, symbol_counts);
+    for (i = 0 ; i < 12 ; i++) {
+#ifdef PRINTON
+      fprintf(stderr, ".");
+#endif
+      if (i < 6) {
+        pthread_join(build_tree_threads[i], NULL);
+        pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
+      } else
+        pthread_join(build_tree_threads[i - 6], NULL);
+#ifdef PRINTON
+      fprintf(stderr, ".");
+#endif
+      score_symbol_tree(tree_thread_data[i].min_symbol, tree_thread_data[i].max_symbol,
+          rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num, profit_ratio_power,
+          symbol_entropy, symbol_counts);
+    }
+
+    if ((node_ptrs_num & 0xFFF) == 0)
+      while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
+          >= 0xF000); // wait
+    rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
+    atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
+    pthread_join(*rank_scores_thread1, NULL);
+#ifdef PRINTON
+    fprintf(stderr, "\rStart %.4f", cycle_start_ratio);
+#endif
+    *out_cycle_end_ratio = (float)(in_symbol_ptr - start_symbol_ptr) / (float)num_file_symbols;
+  } else {
+    do {
+      symbol = *in_symbol_ptr++;
+      if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
+        add_suffix(symbol, in_symbol_ptr, &next_node_num);
+        if (next_node_num >= main_nodes_limit) {
+          break;
+        }
+      }
+    } while (in_symbol_ptr != end_cycle_symbol_ptr);
+    node_ptrs_num = 0;
+    atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
+    atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
+    i = 0;
+    do {
+      if (symbol_counts[i] != 0) {
+        symbol_entropy_f[i] = symbol_counts[i] < NUM_PRECALCULATED_LOG2_X
+                            ? (float)(log_file_symbols - log2_x[symbol_counts[i]])
+                            : (float)log_file_symbols - log2f((float)symbol_counts[i]);
+      }
+    } while (++i < next_new_symbol_number);
+    rank_scores_data_ptr->max_scores = (uint16_t)max_scores;
+    rank_scores_data_ptr->num_file_symbols = num_file_symbols;
+    pthread_join(build_tree_threads[0], NULL);
+    pthread_create(rank_scores_thread1, NULL, rank_scores_thread_fast, (void *)rank_scores_data_ptr);
+    score_symbol_tree_fast(0, tree_thread_data[0].max_symbol, rank_scores_data_ptr->rank_scores_buffer, node_data,
+        &node_ptrs_num, production_cost, profit_ratio_power, log2_num_symbols_plus_substitution_cost, new_symbol_cost,
+        symbol_entropy_f, symbol_counts);
+    for (i = 1 ; i <= 12 ; i++) {
+      if (i <= 6) {
+        pthread_join(build_tree_threads[i], NULL);
+        pthread_create(&build_tree_threads[i - 1], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
+      } else
+        pthread_join(build_tree_threads[i - 7], NULL);
+      score_symbol_tree_fast(tree_thread_data[i].min_symbol, tree_thread_data[i].max_symbol,
+          rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num, production_cost, profit_ratio_power,
+          log2_num_symbols_plus_substitution_cost, new_symbol_cost, symbol_entropy_f, symbol_counts);
+    }
+    if ((node_ptrs_num & 0xFFF) == 0)
+      while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
+          >= 0xF000); // wait
+    rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
+    atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
+    pthread_join(*rank_scores_thread1, NULL);
+  }
+
+  *out_in_symbol_ptr = in_symbol_ptr;
+  *out_symbol = symbol;
+  *out_next_node_num = next_node_num;
+  *out_node_ptrs_num = node_ptrs_num;
+}
+
 void main_loop(
   uint32_t* p_num_rules,
-  uint8_t scan_mode, /* phase state: 0=word pass, 1=run dedup, 2=general scan, 3=retry w/ lower min_score;
-                      * initial value from GLZAcompress is 0/1 gate (skip word pass when non-zero) */
+  enum glza_scan_mode scan_mode,
   uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
   uint32_t** p_in_symbol_ptr,
@@ -3502,13 +3764,13 @@ void main_loop(
   int32_t* base_node_child_num_ptr; /* cursor into base_nodes_child_node_num during word-tree init */
   uint16_t num_candidates;        /* candidates accepted this pass (<= max_scores, <= max_rules headroom) */
   uint16_t node_ptrs_num;         /* rank_scores_buffer fill level / sync counter for rank thread */
-  float new_min_score;            /* scratch while adapting min_score (scan_mode==3 retry path) */
-  float log2_num_symbols_plus_substitution_cost; /* log2(n)+1.4; set in main_loop_init when scan_mode==0 or fast_mode==1;
-                                                  * passed to score_symbol_tree_words (word pass) and score_symbol_tree_fast */
+  float new_min_score;            /* scratch while adapting min_score (GLZA_SCAN_RETRY path) */
+  float log2_num_symbols_plus_substitution_cost; /* log2(n)+1.4; set in main_loop_init for GLZA_SCAN_WORDS or fast_mode==1 */
   float production_cost;          /* per-production overhead; same init branch as log2_num_symbols_plus_substitution_cost */
   size_t block_size;              /* num_file_symbols >> 3; overlap-check thread block stride */
+  size_t i;                       /* fast-mode section rotation; also used in overlap/substitution loops */
   double order_0_entropy;         /* fast_mode==0 min_score input for scan_mode0(); BUG: never assigned before that call */
-  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS]; /* repeat-cost table; filled when scan_mode==0 or fast_mode==1 */
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS]; /* repeat-cost table; filled for GLZA_SCAN_WORDS or fast_mode==1 */
   struct tree_thread_data tree_thread_data[13]; /* parallel suffix-tree builders; 12 threads if fast_mode==0 else 13 */
 
   size_t substitute_heap_size = 0; /* bytes allocated for substitute_heap_buf; only when num_file_symbols >= 1M */
@@ -3555,8 +3817,8 @@ void main_loop(
       &node_num_limit
     );
 
-    if (scan_mode == 0) {
-      scan_mode = 1;
+    if (scan_mode == GLZA_SCAN_WORDS) {
+      scan_mode = GLZA_SCAN_RUN_DEDUP;
       scan_mode0(
         &base_node_child_num_ptr,
         &next_node_num,
@@ -3601,8 +3863,8 @@ void main_loop(
       continue;
     }
 
-    if (scan_mode == 1) {
-      scan_mode = 2;
+    if (scan_mode == GLZA_SCAN_RUN_DEDUP) {
+      scan_mode = GLZA_SCAN_GENERAL;
       if (scan_mode1(
             &in_symbol_ptr,
             &symbol,
@@ -3625,231 +3887,32 @@ void main_loop(
     start_cycle_symbol_ptr = start_symbol_ptr + (uint32_t)(cycle_start_ratio * (float)num_file_symbols);
     in_symbol_ptr = start_cycle_symbol_ptr;
 
-    // setup to build the suffix tree
-    uint32_t main_max_symbol;   /* highest symbol id handled by main (non-worker) suffix-tree builder this pass */
-    uint32_t main_nodes_limit;  /* node budget for main thread; fast_mode==0: 18% of nodes; fast_mode==1: 6% */
-    size_t i = 1;
-    uint32_t nodes_div_100 = node_num_limit / 100;
-    uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
-    uint32_t *end_cycle_symbol_ptr;   /* fast_mode==1 only: end of current fast_section slice */
-    next_node_num = 1;
-      if (fast_mode == 0) {
-      // NOLINTBEGIN(readability-magic-numbers)
-      uint8_t thread_symbol_limit[] = {
-            5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
-      };
-      uint32_t thread_first_node_num[] = {
-        18 * nodes_div_100,
-        31 * nodes_div_100,
-        43 * nodes_div_100,
-        56 * nodes_div_100,
-        70 * nodes_div_100,
-        85 * nodes_div_100,
-        1,
-        16 * nodes_div_100,
-        31 * nodes_div_100,
-        43 * nodes_div_100,
-        56 * nodes_div_100,
-        70 * nodes_div_100
-      };
-      uint32_t thread_nodes_limit[] = {
-        31 * nodes_div_100,
-        43 * nodes_div_100,
-        56 * nodes_div_100,
-        70 * nodes_div_100,
-        85 * nodes_div_100,
-        node_num_limit,
-        16 * nodes_div_100,
-        31 * nodes_div_100,
-        43 * nodes_div_100,
-        56 * nodes_div_100,
-        70 * nodes_div_100,
-        85 * nodes_div_100        
-      };
-      main_nodes_limit = (nodes_div_100 * 18) - 10;
-      // NOLINTEND(readability-magic-numbers)
-      main_max_symbol = stca_setup(
-          fast_mode,
-          12,
-          thread_symbol_limit,
-          thread_first_node_num,
-          thread_nodes_limit,
-          node_num_limit,
-          num_rules,
-          next_new_symbol_number,
-          tree_thread_data,
-          start_cycle_symbol_ptr
-      );
-
-      scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
-      max_symbol_ptr = 0;
-      for (size_t i = 0 ; i < 6 ; i++) {
-        pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
-      }
-    } else {
-      // NOLINTBEGIN(readability-magic-numbers)
-      uint8_t thread_symbol_limit[] = {
-        6, 12, 19, 26, 34, 43, 54, 67, 73, 79, 85, 90, 95
-      };
-      uint32_t thread_first_node_num[] = {
-        6 * nodes_div_100,
-         12 * nodes_div_100,
-         22 * nodes_div_100,
-         34 * nodes_div_100,
-         48 * nodes_div_100,
-         64 * nodes_div_100,
-         81 * nodes_div_100,
-         1,
-         12 * nodes_div_100,
-         22 * nodes_div_100,
-         34 * nodes_div_100,
-         48 * nodes_div_100,
-         64 * nodes_div_100
-      };
-      uint32_t thread_nodes_limit[] = {
-        12 * nodes_div_100,
-         22 * nodes_div_100,
-         34 * nodes_div_100,
-         48 * nodes_div_100,
-         64 * nodes_div_100,
-         81 * nodes_div_100,
-         node_num_limit,
-         12 * nodes_div_100,
-         22 * nodes_div_100,
-         34 * nodes_div_100,
-         48 * nodes_div_100,
-         64 * nodes_div_100,
-         81 * nodes_div_100
-      };
-      size_t thread_count = 13;
-      main_nodes_limit = (nodes_div_100 * 6) - 10;
-      // NOLINTEND(readability-magic-numbers)
-      main_max_symbol = stca_setup(
-          fast_mode,
-          13,
-          thread_symbol_limit,
-          thread_first_node_num,
-          thread_nodes_limit,
-          node_num_limit,
-          num_rules,
-          next_new_symbol_number,
-          tree_thread_data,
-          start_cycle_symbol_ptr
-      );
-
-      end_cycle_symbol_ptr = fast_section == fast_sections - 1 /* fast_mode==1 only */
-                           ? end_symbol_ptr
-                           : start_symbol_ptr + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
-
-      atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_relaxed);
-      atomic_store_explicit(&max_symbol_ptr, (uintptr_t)end_cycle_symbol_ptr, memory_order_release);
-      for (size_t i = 0 ; i < 7 ; i++) {
-        pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i]);
-      }
-    }
-    memset(base_nodes_child_node_num, 0, 4 * (main_max_symbol + 1) * BASE_NODES_CHILD_ARRAY_SIZE);
-
-    if (fast_mode == 0) {
-      do {
-        symbol = *in_symbol_ptr++;
-        if (symbol <= main_max_symbol) {
-          atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_relaxed);
-          if ((int32_t)*in_symbol_ptr >= 0) {
-            add_suffix(symbol, in_symbol_ptr, &next_node_num);
-            if (next_node_num >= main_nodes_limit)
-              goto done_building_tree_tree;
-          }
-        }
-      } while (symbol != 0xFFFFFFFE);
-      in_symbol_ptr--;
-done_building_tree_tree:
-      atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_relaxed);
-      atomic_store_explicit(&max_symbol_ptr, (uintptr_t)in_symbol_ptr, memory_order_release);
-      node_ptrs_num = 0;
-      atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
-      atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
-#ifdef PRINTON
-      fprintf(stderr, ".");
-#endif
-      rank_scores_data_ptr->max_scores = (uint16_t)max_scores;
-
-      pthread_create(&rank_scores_thread1, NULL, rank_scores_thread, (void *)rank_scores_data_ptr);
-      score_symbol_tree(0, main_max_symbol, rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num,
-          profit_ratio_power, symbol_entropy, symbol_counts);
-      for (i = 0 ; i < 12 ; i++) {
-#ifdef PRINTON
-        fprintf(stderr, ".");
-#endif
-        if (i < 6) {
-          pthread_join(build_tree_threads[i], NULL);
-          pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
-        } else
-          pthread_join(build_tree_threads[i - 6], NULL);
-#ifdef PRINTON
-        fprintf(stderr, ".");
-#endif
-        score_symbol_tree(tree_thread_data[i].min_symbol, tree_thread_data[i].max_symbol,
-            rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num, profit_ratio_power,
-            symbol_entropy, symbol_counts);
-      }
-
-      if ((node_ptrs_num & 0xFFF) == 0)
-        while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
-            >= 0xF000); // wait
-      rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
-      atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
-      pthread_join(rank_scores_thread1, NULL);
-#ifdef PRINTON
-      fprintf(stderr, "\rStart %.4f", cycle_start_ratio);
-#endif
-      cycle_end_ratio = (float)(in_symbol_ptr - start_symbol_ptr) / (float)num_file_symbols;
-    } else {
-      // begin fast_mode == 1
-      do {
-        symbol = *in_symbol_ptr++;
-        if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
-          add_suffix(symbol, in_symbol_ptr, &next_node_num);
-          if (next_node_num >= main_nodes_limit) {
-            break;
-          }
-        }
-      } while (in_symbol_ptr != end_cycle_symbol_ptr);
-      node_ptrs_num = 0;
-      atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
-      atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
-      i = 0;
-      do {
-        if (symbol_counts[i] != 0) {
-          symbol_entropy_f[i] = symbol_counts[i] < NUM_PRECALCULATED_LOG2_X
-                              ? (float)(log_file_symbols - log2_x[symbol_counts[i]])
-                              : (float)log_file_symbols - log2f((float)symbol_counts[i]);
-        }
-      } while (++i < next_new_symbol_number);
-      rank_scores_data_ptr->max_scores = (uint16_t)max_scores;
-      rank_scores_data_ptr->num_file_symbols = num_file_symbols;
-      pthread_join(build_tree_threads[0], NULL);
-      pthread_create(&rank_scores_thread1, NULL, rank_scores_thread_fast, (void *)rank_scores_data_ptr);
-      score_symbol_tree_fast(0, tree_thread_data[0].max_symbol, rank_scores_data_ptr->rank_scores_buffer, node_data,
-          &node_ptrs_num, production_cost, profit_ratio_power, log2_num_symbols_plus_substitution_cost, new_symbol_cost,
-          symbol_entropy_f, symbol_counts);
-      for (i = 1 ; i <= 12 ; i++) {
-        if (i <= 6) {
-          pthread_join(build_tree_threads[i], NULL);
-          pthread_create(&build_tree_threads[i - 1], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
-        } else
-          pthread_join(build_tree_threads[i - 7], NULL);
-        score_symbol_tree_fast(tree_thread_data[i].min_symbol, tree_thread_data[i].max_symbol,
-            rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num, production_cost, profit_ratio_power,
-            log2_num_symbols_plus_substitution_cost, new_symbol_cost, symbol_entropy_f, symbol_counts);
-      }
-      if ((node_ptrs_num & 0xFFF) == 0)
-        while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
-            >= 0xF000); // wait
-      rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
-      atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
-      pthread_join(rank_scores_thread1, NULL);
-      // end fast_mode == 1
-    }
+    build_and_score_suffix_tree(
+      &in_symbol_ptr,
+      &symbol,
+      &next_node_num,
+      &node_ptrs_num,
+      &cycle_end_ratio,
+      start_cycle_symbol_ptr,
+      node_num_limit,
+      next_new_symbol_number,
+      num_rules,
+      max_scores,
+      cycle_start_ratio,
+      fast_section,
+      fast_sections,
+      symbol_entropy,
+      symbol_entropy_f,
+      profit_ratio_power,
+      production_cost,
+      log2_num_symbols_plus_substitution_cost,
+      new_symbol_cost,
+      rank_scores_data_ptr,
+      node_data,
+      tree_thread_data,
+      build_tree_threads,
+      &rank_scores_thread1
+    );
     num_candidates = rank_scores_data_ptr->num_candidates;
     prior_cycle_symbols = in_symbol_ptr - start_cycle_symbol_ptr;
 
@@ -3859,7 +3922,7 @@ done_building_tree_tree:
         fprintf(stderr, "\r");
 #endif
       }
-      if (scan_mode == 3) {
+      if (scan_mode == GLZA_SCAN_RETRY) {
         if (min_score > 0.0) {
           num_candidates = 1;
           prior_min_score = min_score;
@@ -3878,10 +3941,10 @@ done_building_tree_tree:
           fast_min_score = 1.0;
 
           num_candidates = 1;
-          scan_mode = 2;
+          scan_mode = GLZA_SCAN_GENERAL;
         }
       } else {
-        scan_mode = 3;
+        scan_mode = GLZA_SCAN_RETRY;
         num_candidates = 1;
         prior_min_score = min_score;
         min_score = 0.25 * min_score;
@@ -3935,7 +3998,7 @@ done_building_tree_tree:
             section_scores[i] = BIG_FLOAT;
           prior_min_score = BIG_FLOAT;
           fast_min_score = 1.0;
-          scan_mode = 2;
+          scan_mode = GLZA_SCAN_GENERAL;
         } else {
           i = fast_section + 1;
           if (i == fast_sections)
@@ -4647,7 +4710,7 @@ main_overlap_check_loop_end:
       num_file_symbols = end_symbol_ptr - start_symbol_ptr;
 
       if (fast_mode == 0) {
-        if (scan_mode == 3) {
+        if (scan_mode == GLZA_SCAN_RETRY) {
           if (rank_scores_data_ptr->num_candidates != 0) {
             if (rank_scores_data_ptr->num_candidates == (uint16_t)max_scores) {
               if (min_score < prior_min_score) {
@@ -4689,13 +4752,13 @@ main_overlap_check_loop_end:
             num_candidates = 1;
           }
         } else {
-          scan_mode = 3;
+          scan_mode = GLZA_SCAN_RETRY;
           prior_min_score = min_score;
           min_score = 0.25 * min_score;
           if (min_score < 10.0)
             min_score = 10.0;
         }
-      } else if (scan_mode == 3) {
+      } else if (scan_mode == GLZA_SCAN_RETRY) {
         if (num_candidates == (uint16_t)max_scores) {
           if (min_score < prior_min_score) {
             if (prior_min_score != BIG_FLOAT) {
@@ -4736,7 +4799,7 @@ main_overlap_check_loop_end:
         } else if (min_score < 0.0)
           min_score = 0.0;
       } else
-        scan_mode = 3;
+        scan_mode = GLZA_SCAN_RETRY;
     }
 
     if (fast_mode == 0) {
@@ -4794,7 +4857,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   // uint8_t fast_mode; — file-global; set below from params (forced 0 when in_size < 1000)
   // double order_ratio; — file-global; from params->order
   double profit_ratio_power; /* exponent on profit ratio; default 1.0 (fast) or 2.0 (slow) unless user-set */
-  uint8_t create_words;      /* if 0, word pass skipped (initial scan_mode gate set non-zero) */
+  uint8_t create_words;      /* if 0, word pass skipped (initial_scan_mode = GLZA_SCAN_RUN_DEDUP) */
   {
     if (params != 0) {
       if (params->user_set_profit_ratio_power != 0)
@@ -5044,11 +5107,13 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   min_score = 10.0;
   uint16_t scan_cycle = 0; /* compression pass counter; surfaced in PRINTON and output validation */
 
+  enum glza_scan_mode initial_scan_mode =
+      (((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0))
+      ? GLZA_SCAN_RUN_DEDUP
+      : GLZA_SCAN_WORDS;
   main_loop(
     &num_rules,
-    /* initial scan_mode gate (0=run word pass first, non-zero=skip to dedup/general scan):
-     *   ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0) */
-    ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0),
+    initial_scan_mode,
     num_terminals_used,
     end_RAM_ptr,
     &in_symbol_ptr,
