@@ -2092,7 +2092,6 @@ void score_symbol_tree_words(struct node_score_data *rank_scores_buffer, struct 
           log2_num_symbols_plus_substitution_cost, new_symbol_cost, symbol_entropy, rank_scores_buffer,
           node_ptrs_num_ptr);
   } while (++base_node_child_num_ptr <= base_node_child_num_end_ptr);
-  return;
 }
 
 
@@ -2562,7 +2561,7 @@ void *substitute_thread(void *arg) {
 uint32_t stca_setup(
   uint8_t fast_mode,
   const size_t thread_count,
-  uint8_t thread_symbol_limit[],
+  const uint8_t thread_symbol_limit[],
   uint32_t thread_first_node_num[],
   uint32_t thread_nodes_limit[],
   uint32_t node_num_limit,
@@ -2582,7 +2581,7 @@ uint32_t stca_setup(
     while (sum_symbols < symbols_limit && i < next_new_symbol_number) {
       sum_symbols += symbol_counts[i++];
     }
-    if (j != 0) {
+    if (j > 0) {
       tree_thread_data[j - 1].max_symbol = i - 1;
     } else {
       main_max_symbol = i - 1;
@@ -2594,7 +2593,6 @@ uint32_t stca_setup(
   }
   
   tree_thread_data[thread_count - 1].max_symbol = next_new_symbol_number - 1;
-
 
   for (size_t j = 0 ; j < thread_count ; j++) {
     tree_thread_data[j].start_cycle_symbol_ptr = start_cycle_symbol_ptr;
@@ -2637,6 +2635,114 @@ float update_cycle_start_ratio(
   } else {
     return 1.0 - (0.97 * (cycle_end_ratio - cycle_start_ratio));
   }
+}
+
+double xlogx(double arg) {
+  return arg * log2(arg);
+}
+
+void main_loop_init(
+  uint32_t *out_next_new_symbol_number,
+  uint32_t num_rules,
+  double* out_d_num_file_symbols,
+  uint8_t** out_free_RAM_ptr,
+  double** out_symbol_entropy,
+  float** out_symbol_entropy_f,
+  uint8_t scan_mode,
+  float* ptr_log2_num_symbols_plus_substitution_cost,
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS],
+  float* ptr_production_cost,
+  uint32_t num_terminals_used,
+  uint16_t* ptr_scan_cycle,
+  const uint8_t* end_RAM_ptr,
+  uint32_t* out_node_num_limit
+) {
+  uint32_t next_new_symbol_number = num_terminals + num_rules;
+  child_ptr_array_size = next_new_symbol_number;
+  double d_num_file_symbols = (double)num_file_symbols;
+  log_file_symbols = log2(d_num_file_symbols);
+  uint8_t* free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+  double* symbol_entropy = (double *)free_RAM_ptr;
+  float* symbol_entropy_f = (float *)free_RAM_ptr;
+
+  free_RAM_ptr += (1 + ((scan_mode != 0) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
+  if ((scan_mode != 0) && (fast_mode == 0)) {
+    num_file_symbols_p1_x_log_file_symbols_p1 = xlogx(num_file_symbols + 1);
+    for (size_t i = 1; i < NUM_PRECALCULATED_NFSMR_LOGS; i++) {
+      double tmp = num_file_symbols - i + 1;
+      nfs_profit[i] = num_file_symbols_p1_x_log_file_symbols_p1 - xlogx(tmp);
+    }
+    new_rule_cost = num_file_symbols_p1_x_log_file_symbols_p1 - xlogx(d_num_file_symbols) + 1.0
+                  + (num_rules == 0 ? 0 : xlogx(num_rules) - xlogx(num_rules + 1));
+  } else {
+    float log2_num_symbols_plus_substitution_cost = (float)log_file_symbols + 1.4;
+    for (size_t i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++) {
+      new_symbol_cost[i] = log2_num_symbols_plus_substitution_cost - (float)log2_x[i - 1]; // -1 for repeats only
+    }
+    *ptr_production_cost = scan_mode == 0
+                    ? log2f((float)d_num_file_symbols / (float)num_terminals_used) + 1.2
+                    : log2f((float)d_num_file_symbols / (float)(num_rules + 1)) + 1.2;
+    *ptr_log2_num_symbols_plus_substitution_cost = log2_num_symbols_plus_substitution_cost;
+  }
+
+  uint16_t scan_cycle = *ptr_scan_cycle;
+  if (fast_mode == 0) {
+    double order_0_entropy = 0.0;
+    {
+      size_t i = 0;
+      do {
+        if (symbol_counts[i] != 0) {
+          symbol_entropy[i] = log_file_symbols
+                            - (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X
+                              ? log2_x[symbol_counts[i]]
+                              : log2((double)symbol_counts[i]));
+          order_0_entropy += symbol_entropy[i] * (double)symbol_counts[i];
+        }
+      } while (++i < next_new_symbol_number);
+    }
+    if (scan_mode == 0) {
+      size_t i = 0;
+      do {
+        if (symbol_counts[i] != 0) {
+          symbol_entropy_f[i] = (float)symbol_entropy[i];
+        }
+      } while (++i < next_new_symbol_number);
+    }
+    if (num_rules != 0) {
+      order_0_entropy += (double)(num_rules + 1) * (log_file_symbols - log2((double)num_rules));
+    }
+    // __jm__ why does one printf log num_rules and the other num_rules+1? seems like a bug
+#ifdef PRINTON
+    fprintf(stderr, "PASS %u: grammar size: %u, %u production rules, %.4f bits/sym, o0e %u bytes\n",
+        (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules,
+        (float)(order_0_entropy / d_num_file_symbols), (unsigned int)(order_0_entropy * 0.125));
+#endif
+  } else {
+#ifdef PRINTON
+    fprintf(stderr, "PASS %u: grammar size: %u, %u production rules\r",
+        (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules + 1);
+#endif
+  }
+
+  // Set the memory adddress for the suffix tree nodes
+  base_nodes_child_node_num = (int32_t *)free_RAM_ptr;
+  nodes = (struct node *)((size_t)free_RAM_ptr + (sizeof(int32_t) * (size_t)next_new_symbol_number * BASE_NODES_CHILD_ARRAY_SIZE));
+  {
+    size_t nodes_room = (size_t)end_RAM_ptr - (size_t)nodes;
+    if (nodes >= (struct node *)end_RAM_ptr || nodes_room < sizeof(struct node)) {
+      fprintf(stderr, "ERROR - Insufficient RAM for suffix tree nodes\n");
+      exit(1);
+    }
+    nodes_num_limit = (uint32_t)(nodes_room / sizeof(struct node));
+  }
+
+  *ptr_scan_cycle = scan_cycle;
+  *out_node_num_limit = nodes_num_limit;
+  *out_next_new_symbol_number = next_new_symbol_number;
+  *out_d_num_file_symbols = d_num_file_symbols;
+  *out_free_RAM_ptr = free_RAM_ptr;
+  *out_symbol_entropy = symbol_entropy;
+  *out_symbol_entropy_f = symbol_entropy_f;
 }
 
 uint8_t scan_mode0(
@@ -3205,7 +3311,6 @@ wmain_symbol_substitution_loop_end2:
 
 void main_loop(
   uint32_t* p_num_rules,
-  uint32_t * p_next_new_symbol_number,
   uint8_t scan_mode,
   uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
@@ -3239,7 +3344,6 @@ void main_loop(
   uint32_t num_match_nodes;
   uint32_t suffix_node_number;
   uint32_t next_node_num;
-  uint32_t node_num_limit;
   uint32_t max_match_length;
   uint32_t best_score_num_symbols;
   uint32_t num_overlaps;
@@ -3264,11 +3368,8 @@ void main_loop(
   float new_min_score;
   float log2_num_symbols_plus_substitution_cost;
   float production_cost;
-  float* symbol_entropy_f;
-  uint8_t* free_RAM_ptr;
   size_t block_size;
   double order_0_entropy;
-  double* symbol_entropy;
   float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
   struct tree_thread_data tree_thread_data[13];
 
@@ -3286,87 +3387,35 @@ void main_loop(
   pthread_t overlap_check_threads[7];
   pthread_t rank_scores_thread1;
 
-  uint32_t next_new_symbol_number;
   uint32_t* in_symbol_ptr = *p_in_symbol_ptr;
   uint32_t num_rules = *p_num_rules;
   uint16_t scan_cycle = *p_scan_cycle;
 
   do {
 top_main_loop:
-    next_new_symbol_number = num_terminals + num_rules;
-    child_ptr_array_size = next_new_symbol_number;
-    double d_num_file_symbols = (double)num_file_symbols;
-    log_file_symbols = log2(d_num_file_symbols);
-    // __jm__ wtf does this & ~7 do
-    free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
-    symbol_entropy = (double *)free_RAM_ptr;
-    symbol_entropy_f = (float *)free_RAM_ptr;
-    free_RAM_ptr += (1 + ((scan_mode != 0) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
-    if ((scan_mode != 0) && (fast_mode == 0)) {
-      num_file_symbols_p1_x_log_file_symbols_p1 = (double)(num_file_symbols + 1) * log2((double)(num_file_symbols + 1));
-      for (size_t i = 1; i < NUM_PRECALCULATED_NFSMR_LOGS; i++)
-        nfs_profit[i] = num_file_symbols_p1_x_log_file_symbols_p1
-          - (double)(num_file_symbols - i + 1) * log2((double)(num_file_symbols - i + 1));
-      if (num_rules != 0)
-        new_rule_cost = num_file_symbols_p1_x_log_file_symbols_p1 + (double)num_rules * log2((double)num_rules)
-          - (double)(num_rules + 1) * log2((double)(num_rules + 1)) - d_num_file_symbols * log2(d_num_file_symbols) + 1.0;
-      else
-        new_rule_cost =  num_file_symbols_p1_x_log_file_symbols_p1 - d_num_file_symbols * log2(d_num_file_symbols) + 1.0;
-    } else {
-      log2_num_symbols_plus_substitution_cost = (float)log_file_symbols + 1.4;
-      for (size_t i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++)
-        new_symbol_cost[i] = log2_num_symbols_plus_substitution_cost - (float)log2_x[i - 1]; // -1 for repeats only
-        production_cost = scan_mode == 0
-                        ? log2f((float)d_num_file_symbols / (float)num_terminals_used) + 1.2
-                        : log2f((float)d_num_file_symbols / (float)(num_rules + 1)) + 1.2;
-    }
+    uint32_t next_new_symbol_number;
+    double d_num_file_symbols;
+    uint8_t* free_RAM_ptr;
+    double* symbol_entropy;
+    float* symbol_entropy_f;
+    uint32_t node_num_limit;
 
-    if (fast_mode == 0) {
-      order_0_entropy = 0.0;
-      size_t i = 0;
-      do {
-        if (symbol_counts[i] != 0) {
-          if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X)
-            symbol_entropy[i] = log_file_symbols - log2_x[symbol_counts[i]];
-          else
-            symbol_entropy[i] = log_file_symbols - log2((double)symbol_counts[i]);
-          order_0_entropy += symbol_entropy[i] * (double)symbol_counts[i];
-        }
-      } while (++i < next_new_symbol_number);
-      if (scan_mode == 0) {
-        i = 0;
-        do {
-          if (symbol_counts[i] != 0)
-            symbol_entropy_f[i] = (float)symbol_entropy[i];
-        } while (++i < next_new_symbol_number);
-      }
-      if (num_rules != 0)
-        order_0_entropy += (double)(num_rules + 1) * (log_file_symbols - log2((double)num_rules));
-      // __jm__ why does one printf log num_rules and the other num_rules+1? seems like a bug
-#ifdef PRINTON
-      fprintf(stderr, "PASS %u: grammar size: %u, %u production rules, %.4f bits/sym, o0e %u bytes\n",
-          (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules,
-          (float)(order_0_entropy / d_num_file_symbols), (unsigned int)(order_0_entropy * 0.125));
-#endif
-    } else {
-#ifdef PRINTON
-      fprintf(stderr, "PASS %u: grammar size: %u, %u production rules\r",
-          (unsigned int)++scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules + 1);
-#endif
-    }
-
-    // Set the memory adddress for the suffix tree nodes
-    base_nodes_child_node_num = (int32_t *)free_RAM_ptr;
-    nodes = (struct node *)((size_t)free_RAM_ptr + sizeof(int32_t) * (size_t)next_new_symbol_number * BASE_NODES_CHILD_ARRAY_SIZE);
-    {
-      size_t nodes_room = (size_t)end_RAM_ptr - (size_t)nodes;
-      if (nodes >= (struct node *)end_RAM_ptr || nodes_room < sizeof(struct node)) {
-        fprintf(stderr, "ERROR - Insufficient RAM for suffix tree nodes\n");
-        exit(1);
-      }
-      node_num_limit = (uint32_t)(nodes_room / sizeof(struct node));
-      nodes_num_limit = node_num_limit;
-    }
+    main_loop_init(
+      &next_new_symbol_number,
+      num_rules,
+      &d_num_file_symbols,
+      &free_RAM_ptr,
+      &symbol_entropy,
+      &symbol_entropy_f,
+      scan_mode,
+      &log2_num_symbols_plus_substitution_cost,
+      new_symbol_cost,
+      &production_cost,
+      num_terminals_used,
+      &scan_cycle,
+      end_RAM_ptr,
+      &node_num_limit
+    );
 
     if (scan_mode == 0) {
       scan_mode = 1;
@@ -3426,11 +3475,10 @@ top_main_loop:
         if (symbol == prior_symbol)
           run_length++;
         else {
-          if (run_length != 0) {
-            if (run_length > max_run_length[prior_symbol])
-              max_run_length[prior_symbol] = run_length;
-            run_length = 0;
+          if (run_length != 0 && run_length > max_run_length[prior_symbol]) {
+            max_run_length[prior_symbol] = run_length;
           }
+          run_length = 0;
           prior_symbol = symbol <= max_terminal ? symbol : 0xFFFFFFFE;
         }
       } while (in_symbol_ptr != end_symbol_ptr);
@@ -3521,6 +3569,7 @@ top_main_loop:
     uint32_t main_nodes_limit;
     size_t i = 1;
     uint32_t nodes_div_100 = node_num_limit / 100;
+    uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
     next_node_num = 1;
     if (fast_mode == 0) {
       // NOLINTBEGIN(readability-magic-numbers)
@@ -3581,7 +3630,7 @@ top_main_loop:
         6, 12, 19, 26, 34, 43, 54, 67, 73, 79, 85, 90, 95
       };
       uint32_t thread_first_node_num[] = {
-        6,
+        6 * nodes_div_100,
          12 * nodes_div_100,
          22 * nodes_div_100,
          34 * nodes_div_100,
@@ -3610,6 +3659,7 @@ top_main_loop:
          64 * nodes_div_100,
          81 * nodes_div_100
       };
+      size_t thread_count = 13;
       main_nodes_limit = (nodes_div_100 * 6) - 10;
       // NOLINTEND(readability-magic-numbers)
       main_max_symbol = stca_setup(
@@ -3692,6 +3742,7 @@ done_building_tree_tree:
 #endif
       cycle_end_ratio = (float)(in_symbol_ptr - start_symbol_ptr) / (float)num_file_symbols;
     } else {
+      // begin fast_mode == 1
       do {
         symbol = *in_symbol_ptr++;
         if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
@@ -3735,6 +3786,7 @@ done_building_tree_tree:
       rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
       atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
       pthread_join(rank_scores_thread1, NULL);
+      // end fast_mode == 1
     }
     num_candidates = rank_scores_data_ptr->num_candidates;
     prior_cycle_symbols = in_symbol_ptr - start_cycle_symbol_ptr;
@@ -4644,7 +4696,6 @@ main_overlap_check_loop_end:
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
 
   // __jm__ mutate results
-  *p_next_new_symbol_number = next_new_symbol_number;
   *p_scan_cycle = scan_cycle;
   *p_num_rules = num_rules;
   *p_in_symbol_ptr = in_symbol_ptr;
@@ -4926,10 +4977,8 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   min_score = 10.0;
   uint16_t scan_cycle = 0;
 
-  uint32_t next_new_symbol_number;
   main_loop(
     &num_rules,
-    &next_new_symbol_number,
     ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0),
     num_terminals_used,
     end_RAM_ptr,
@@ -4988,7 +5037,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   else
     *in_char_ptr++ = format;
   in_symbol_ptr = start_symbol_ptr;
-  next_new_symbol_number = num_terminals + num_rules;
+  uint32_t next_new_symbol_number = num_terminals + num_rules;
   {
     uint32_t *validate_ptr = start_symbol_ptr;
     uint32_t invalid_count = 0;
