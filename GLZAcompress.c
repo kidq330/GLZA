@@ -1032,9 +1032,8 @@ void *rank_scores_thread_fast(void *arg) {
       }
 
       if (num_found_overlaps != 0) { // sort overlap list
-        uint16_t j, k;
-        for (j = 0 ; j < num_found_overlaps - 1 ; j++) {
-          for (k = j + 1 ; k < num_found_overlaps ; k++) {
+        for (uint16_t j = 0 ; j < num_found_overlaps - 1 ; j++) {
+          for (uint16_t k = j + 1 ; k < num_found_overlaps ; k++) {
             section = candidates_position[found_overlaps[j]] >> 8;
             uint16_t rank_j = 0x100 * section
               + (uint8_t)(candidates_position[found_overlaps[j]] - candidates_index_starts[section]);
@@ -1052,16 +1051,18 @@ void *rank_scores_thread_fast(void *arg) {
         score_index = found_overlaps[0];
         first_unused_position = candidates_position[score_index];
         slmi = candidates[score_index].last_match_index;
-        for (i = slmi - candidates[score_index].num_symbols + 1 ; i <= slmi ; i++)
+        for (i = slmi - candidates[score_index].num_symbols + 1 ; i <= slmi ; i++) {
           score_map[i] = 0;
+        }
         section = first_unused_position >> 8;
 
         while (--num_found_overlaps != 0) { // remove lower scoring overlaps
           score_index = found_overlaps[num_found_overlaps];
           position = candidates_position[score_index];
           slmi = candidates[score_index].last_match_index;
-          for (i = slmi - candidates[score_index].num_symbols + 1 ; i <= slmi ; i++)
+          for (i = slmi - candidates[score_index].num_symbols + 1 ; i <= slmi ; i++) {
             score_map[i] = 0;
+          }
           section = position >> 8;
           max_section = --num_candidates >> 8;
           if (section != max_section) {
@@ -3709,6 +3710,995 @@ done_building_tree_tree:
   *out_node_ptrs_num = node_ptrs_num;
 }
 
+void handle_zero_candidates(
+  enum glza_scan_mode *scan_mode,
+  uint16_t *num_candidates,
+  float *prior_min_score,
+  uint8_t *fast_section,
+  uint8_t *fast_sections,
+  float *fast_min_score
+) {
+  if (fast_mode == 0) {
+#ifdef PRINTON
+    fprintf(stderr, "\r");
+#endif
+  }
+  if (*scan_mode == GLZA_SCAN_RETRY) {
+    if (min_score > 0.0) {
+      *num_candidates = 1;
+      *prior_min_score = min_score;
+      min_score = 0.0;
+    } else if (*fast_sections != 1) {
+      if (*fast_sections == 23) {
+        *fast_sections = 9;
+        *fast_section = 0;
+        min_score = 8.0;
+      } else {
+        *fast_sections = (*fast_sections + 1) >> 1;
+        *fast_section >>= 1;
+        min_score = 4.0;
+      }
+      *prior_min_score = BIG_FLOAT;
+      *fast_min_score = 1.0;
+
+      *num_candidates = 1;
+      *scan_mode = GLZA_SCAN_GENERAL;
+    }
+  } else {
+    *scan_mode = GLZA_SCAN_RETRY;
+    *num_candidates = 1;
+    *prior_min_score = min_score;
+    min_score = 0.25 * min_score;
+  }
+}
+
+void process_ranked_candidates(
+  uint16_t *p_num_candidates,
+  enum glza_scan_mode *p_scan_mode,
+  uint32_t next_new_symbol_number,
+  uint32_t max_rules,
+  uint32_t max_scores,
+  uint32_t *p_num_rules,
+  uint32_t *p_first_define_index,
+  uint32_t **p_in_symbol_ptr,
+  uint32_t *p_symbol,
+  uint16_t *candidates_index,
+  uint8_t *candidate_bad,
+  uint8_t *end_RAM_ptr,
+  struct rank_scores_thread_data *rank_scores_data_ptr,
+  struct overlap_check **p_overlap_check_data,
+  struct overlap_check **p_overlap_check_heap_buf,
+  uint32_t *p_num_match_nodes,
+  uint32_t *p_max_match_length,
+  uint32_t **p_match_strings,
+  uint8_t *p_fast_section,
+  uint8_t *p_fast_sections,
+  uint8_t *p_section_repeats,
+  float section_scores[23],
+  float *p_prior_min_score,
+  float *p_fast_min_score,
+  float *p_new_min_score,
+  uint16_t scan_cycle
+) {
+#define num_candidates (*p_num_candidates)
+#define scan_mode (*p_scan_mode)
+#define num_rules (*p_num_rules)
+#define first_define_index (*p_first_define_index)
+#define in_symbol_ptr (*p_in_symbol_ptr)
+#define overlap_check_data (*p_overlap_check_data)
+#define overlap_check_heap_buf (*p_overlap_check_heap_buf)
+#define match_strings (*p_match_strings)
+#define num_match_nodes (*p_num_match_nodes)
+#define max_match_length (*p_max_match_length)
+#define fast_section (*p_fast_section)
+#define fast_sections (*p_fast_sections)
+#define section_repeats (*p_section_repeats)
+#define prior_min_score (*p_prior_min_score)
+#define fast_min_score (*p_fast_min_score)
+#define new_min_score (*p_new_min_score)
+
+  uint32_t symbol = *p_symbol;
+  pthread_t overlap_check_threads[7];
+  uint32_t new_rule_number[0x8000];
+  size_t i;
+  uint32_t *out_symbol_ptr;
+  uint32_t *node_string_start_ptr;
+  uint32_t *match_string_start_ptr;
+  uint32_t *search_match_ptr;
+  uint32_t *block_ptr;
+  uint32_t *stop_symbol_ptr;
+  size_t block_size;
+  uint32_t num_overlaps;
+  uint32_t num_prior_matches;
+  uint32_t node_score_number;
+  uint32_t best_score_num_symbols;
+  uint32_t suffix_node_number;
+  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
+  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
+  struct match_node *match_node_ptr;
+  uint8_t *free_RAM_ptr;
+  uint32_t *stop_matches_symbol_ptr[8];
+
+  free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+  uintptr_t match_region_end_limit = (uintptr_t)end_RAM_ptr;
+  if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
+    match_region_end_limit = (uintptr_t)nodes;
+  struct node_score_data * tmp_candidates = (struct node_score_data *)free_RAM_ptr;
+  memcpy(&tmp_candidates[0], &candidates[0], MAX_SCORES_FAST * sizeof(struct node_score_data));
+  for (uint16_t candidate_num = 0 ; candidate_num < MAX_SCORES_FAST ; candidate_num++) {
+    memcpy(&candidates[candidate_num], &tmp_candidates[candidates_index[candidate_num]],
+        sizeof(struct node_score_data));
+  }
+
+  if (fast_mode == 0) {
+#ifdef PRINTON
+    fprintf(stderr, " score[0-%hu] = %.5f-%.5f\n", (unsigned short int)num_candidates - 1,
+        candidates[0].score, candidates[num_candidates - 1].score);
+#endif
+    if (candidates[num_candidates - 1].score < 0.1 * candidates[0].score - 1.0) {
+      size_t candidate_num = 1;
+      while ((candidate_num + 0x100 < num_candidates)
+          && (candidates[candidate_num + 0x100].score >= 0.1 * candidates[0].score - 1.0))
+        candidate_num += 0x100;
+      while (candidate_num < num_candidates) {
+        if (candidates[candidate_num].score < 0.1 * candidates[0].score - 1.0) {
+          num_candidates = candidate_num;
+          break;
+        }
+        candidate_num++;
+      }
+    }
+  } else if (fast_sections != 1) {
+    section_scores[fast_section] = candidates[num_candidates - 1].score;
+    uint8_t old_fast_section = fast_section; 
+    if (++fast_section == fast_sections)
+      fast_section = 0;
+    if (candidates[num_candidates - 1].score < fast_min_score) {
+      if (fast_sections == 23) {
+        fast_sections = 9;
+        fast_section = 0;
+        min_score = 8.0;
+      } else {
+        fast_sections = (fast_sections + 1) >> 1;
+        fast_section >>= 1;
+        min_score = 4.0;
+      }
+      section_repeats = 0;
+      for (i = 0 ; i < fast_sections ; i++)
+        section_scores[i] = BIG_FLOAT;
+      prior_min_score = BIG_FLOAT;
+      fast_min_score = 1.0;
+      scan_mode = GLZA_SCAN_GENERAL;
+    } else {
+      i = fast_section + 1;
+      if (i == fast_sections)
+        i = 0;
+      while (i != old_fast_section) {
+        if (section_scores[i] > section_scores[fast_section])
+          fast_section = i;
+        if (++i == fast_sections)
+          i = 0;
+      }
+      if ((section_repeats < 2) && (section_scores[old_fast_section] > section_scores[fast_section])) {
+        fast_section = old_fast_section;
+        section_repeats++;
+      } else
+        section_repeats = 0;
+    }
+  }
+
+  if (next_new_symbol_number + num_candidates > max_rules) {
+    num_candidates = max_rules > next_new_symbol_number
+                   ? max_rules - next_new_symbol_number
+                   : 0;
+  }
+
+  // build a prefix tree of the match strings
+  child_ptr_array = (struct match_node **)free_RAM_ptr;
+  struct match_node * match_nodes = (struct match_node *)(free_RAM_ptr
+      + sizeof(struct match_node *) * next_new_symbol_number);
+  uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
+      / sizeof(struct match_node));
+  num_match_nodes = 0;
+  max_match_length = 0;
+  {
+    uint16_t candidate_num = 0;
+    while (candidate_num < num_candidates) {
+      if ((uintptr_t)match_nodes + (num_match_nodes + 1) * sizeof(struct match_node)
+          + (uintptr_t)(candidate_num + 1) * max_match_length * sizeof(uint32_t) >= match_region_end_limit) {
+        num_candidates = candidate_num != 0
+                       ? candidate_num - 1
+                       : 0;
+        break;
+      }
+      uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
+      if (candidates[candidate_num].num_symbols > max_match_length)
+        max_match_length = candidates[candidate_num].num_symbols;
+      best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
+      best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
+      if (num_match_nodes == 0) {
+        init_match_node(match_nodes, *best_score_match_ptr, 0, candidate_num);
+        num_match_nodes = 1;
+      }
+      match_node_ptr = match_nodes;
+      while (best_score_match_ptr <= best_score_last_match_ptr) {
+        symbol = *best_score_match_ptr;
+        if (match_node_ptr->child_ptr == 0) {
+          if (num_match_nodes >= match_nodes_limit) {
+            candidate_bad[candidate_num] = 1;
+            break;
+          }
+          match_node_ptr->child_ptr = &match_nodes[num_match_nodes++];
+          match_node_ptr = match_node_ptr->child_ptr;
+          init_match_node(match_node_ptr, symbol, 0, candidate_num);
+        } else {
+          match_node_ptr = match_node_ptr->child_ptr;
+          uint8_t sibling_number;
+          if (move_to_match_sibling(match_nodes, &match_node_ptr, symbol, &sibling_number) != 0) {
+            if (match_node_ptr->child_ptr == 0) {
+              candidate_bad[candidate_num] = 1;
+              break;
+            }
+          } else {
+            if (num_match_nodes >= match_nodes_limit) {
+              candidate_bad[candidate_num] = 1;
+              break;
+            }
+            match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
+            match_node_ptr = &match_nodes[num_match_nodes++];
+            init_match_node(match_node_ptr, symbol, 0, candidate_num);
+          }
+        }
+        best_score_match_ptr++;
+      }
+      if (match_node_ptr->child_ptr != 0)
+        candidate_bad[candidate_num] = 1;
+      candidate_num++;
+    }
+  }
+
+  // for each candidate, search substrings for matches with other candidates, if found invalidate lower score
+  {
+    uint16_t candidate_num = 0;
+    while (candidate_num < num_candidates) {
+      uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
+      best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
+      best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
+      // read the first symbol
+      symbol = *best_score_match_ptr++;
+      match_node_ptr = &match_nodes[1];
+      move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
+      while (best_score_match_ptr <= best_score_last_match_ptr) {
+        // starting with the second symbol, look for suffixes that are in the prefix tree
+        search_match_ptr = best_score_match_ptr;
+        struct match_node * search_node_ptr = match_nodes;
+        while (1) { // follow the tree until find child = 0 or sibling = 0
+          if (search_node_ptr->child_ptr == 0) { // found a scored string that is a substring of this string
+            if (fast_mode == 0) {
+              if (search_node_ptr->score_number > candidate_num)
+                candidate_bad[search_node_ptr->score_number] = 1;
+              else if (search_node_ptr->score_number != candidate_num)
+                candidate_bad[candidate_num] = 1;
+              break;
+            } else {
+              if (search_node_ptr->score_number > candidate_num) {
+                if (candidate_bad[candidate_num] == 0)
+                  candidate_bad[search_node_ptr->score_number] = 1;
+              } else if (search_node_ptr->score_number != candidate_num) {
+                if (candidate_bad[search_node_ptr->score_number] == 0)
+                  candidate_bad[candidate_num] = 1;
+              }
+              break;
+            }
+          }
+          search_node_ptr = search_node_ptr->child_ptr;
+          symbol = *search_match_ptr;
+          if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
+            break;
+          match_node_ptr->miss_ptr = search_node_ptr;
+          search_match_ptr++;
+        }
+        symbol = *best_score_match_ptr++;
+      }
+      candidate_num++;
+    }
+  }
+
+  // Redo the tree build and miss values with just the valid score symbols
+  match_node_ptr = match_nodes + next_new_symbol_number;
+  num_match_nodes = 0;
+  size_t j = next_new_symbol_number;
+  while (j-- != 0)
+    child_ptr_array[j] = 0;
+  {
+    uint16_t candidate_num = 0;
+    while (candidate_num < num_candidates) {
+      if (candidate_bad[candidate_num] == 0) {
+        uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
+        best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
+        best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
+        struct match_node ** child_ptr_ptr = &child_ptr_array[*best_score_match_ptr++];
+        symbol = *best_score_match_ptr++;
+        best_score_num_symbols = 2;
+        match_node_ptr = move_to_base_match_child_with_make(match_nodes, symbol, candidate_num, &num_match_nodes,
+            child_ptr_ptr);
+        while (best_score_match_ptr <= best_score_last_match_ptr)
+          move_to_match_child_with_make(match_nodes, &match_node_ptr, *best_score_match_ptr++, candidate_num,
+              ++best_score_num_symbols, &num_match_nodes);
+      }
+      candidate_num++;
+    }
+  }
+
+  // span nodes entering the longest (first) suffix match for each node
+  {
+    uint16_t candidate_num = 0;
+    while (candidate_num < num_candidates) {
+      if (candidate_bad[candidate_num] == 0) {
+        uint32_t *best_score_last_match_ptr, *best_score_suffix_ptr;
+        best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
+        best_score_suffix_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
+        suffix_node_number = child_ptr_array[*best_score_suffix_ptr++] - match_nodes;
+        // starting at the node of the 2nd symbol in string, match strings with prefix tree until no match found,
+        //   for each match node found, if suffix miss symbol is zero, set it to the tree symbol node
+        while (best_score_suffix_ptr <= best_score_last_match_ptr) {
+          // follow the suffix until the end (or break on no tree matches)
+          symbol = *best_score_suffix_ptr++;
+          uint32_t shifted_symbol = symbol;
+          while (symbol != match_nodes[suffix_node_number].symbol) {
+            suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_symbol & 0xF];
+            shifted_symbol >>= 4;
+          }
+          match_node_ptr = &match_nodes[suffix_node_number];
+          uint32_t *best_score_match_ptr;
+          best_score_match_ptr = best_score_suffix_ptr;
+          if ((uint32_t)symbol < child_ptr_array_size && child_ptr_array[symbol] != 0) {
+            if ((match_node_ptr->child_ptr != 0) && (match_node_ptr->child_ptr->miss_ptr == 0))
+              write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, child_ptr_array[symbol]);
+            struct match_node * search_node_ptr = child_ptr_array[symbol];
+            while (best_score_match_ptr <= best_score_last_match_ptr) {
+              // follow the tree until end of match string or find child = 0 or sibling = 0
+              symbol = *best_score_match_ptr++;
+              match_node_ptr = match_node_ptr->child_ptr;
+              move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
+              if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
+                break;
+              if (match_node_ptr->child_ptr == 0) {
+                if (match_node_ptr->hit_ptr == 0)
+                  match_node_ptr->hit_ptr = search_node_ptr;
+              } else if (match_node_ptr->child_ptr->miss_ptr == 0)
+                write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, search_node_ptr->child_ptr);
+              if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
+                break;
+              search_node_ptr = search_node_ptr->child_ptr;
+            }
+          }
+          suffix_node_number = match_nodes[suffix_node_number].child_ptr - match_nodes;
+        }
+      }
+      candidate_num++;
+    }
+  }
+
+  // save the match strings so they can be added to the end of the data after symbol substitution is done
+  match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
+  overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
+  if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
+    if (overlap_check_heap_buf == 0) {
+      overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
+      if (overlap_check_heap_buf == 0) {
+        fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
+        exit(1);
+      }
+    }
+    overlap_check_data = overlap_check_heap_buf;
+  }
+  for (size_t i = 1 ; i < 8 ; i++) {
+    overlap_check_data[i].candidate_bad = &candidate_bad[0];
+  }
+
+  {
+    uint16_t candidate_num = 0;
+    while (candidate_num < num_candidates) {
+      if (candidate_bad[candidate_num] == 0) {
+        match_string_start_ptr = &match_strings[candidate_num * max_match_length];
+        node_string_start_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index
+            - candidates[candidate_num].num_symbols + 1;
+        for (size_t j = 0 ; j < candidates[candidate_num].num_symbols ; j++)
+          *(match_string_start_ptr + j) = *(node_string_start_ptr + j);
+      }
+      candidate_num++;
+    }
+  }
+
+  uint32_t *matches_start_ptr[8];
+  uint32_t *next_match_start_ptr[8];
+  uint32_t *matches_stop_ptr[8];
+  uintptr_t match_strings_end = ((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7;
+  uint32_t *begin_matches;
+  uint32_t *matches_end_ptr;
+  if (overlap_check_data == overlap_check_heap_buf) {
+    begin_matches = (uint32_t *)match_strings_end;
+    matches_end_ptr = (uint32_t *)match_region_end_limit;
+  } else {
+    begin_matches = (uint32_t *)((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check));
+    matches_end_ptr = (uint32_t *)end_RAM_ptr;
+  }
+  if (begin_matches >= matches_end_ptr) {
+    begin_matches = matches_end_ptr;
+  }
+  {
+    uint32_t matches_stride = (uint32_t)((matches_end_ptr - begin_matches) >> 3);
+    for (i = 0 ; i < 8 ; i++) {
+      next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + i * matches_stride;
+      matches_stop_ptr[i] = begin_matches + (i + 1) * matches_stride;
+      next_match_ptr[i] = next_match_start_ptr[i];
+    }
+  }
+
+  if (fast_mode == 0) {
+#ifdef PRINTON
+    fprintf(stderr, "Overlap search\r");
+#endif
+  }
+  block_size = num_file_symbols >> 3;
+  block_ptr = start_symbol_ptr + block_size;
+  stop_matches_symbol_ptr[0] = block_ptr;
+  stop_symbol_ptr = block_ptr + MAX_MATCH_LENGTH;
+  if (stop_symbol_ptr >= end_symbol_ptr) {
+    stop_symbol_ptr = end_symbol_ptr;
+    stop_matches_symbol_ptr[0] = end_symbol_ptr;
+  } else {
+    for (size_t i = 1 ; i < 8 ; i++) {
+      overlap_check_data[i].start_symbol_ptr = block_ptr;
+      block_ptr += block_size;
+      if (i < 7) {
+        overlap_check_data[i].stop_matches_symbol_ptr = block_ptr;
+        overlap_check_data[i].stop_symbol_ptr = block_ptr + MAX_MATCH_LENGTH;
+        if (overlap_check_data[i].stop_symbol_ptr > end_symbol_ptr)
+          overlap_check_data[i].stop_symbol_ptr = end_symbol_ptr;
+      } else {
+        overlap_check_data[7].stop_matches_symbol_ptr = end_symbol_ptr;
+        overlap_check_data[7].stop_symbol_ptr = end_symbol_ptr;
+      }
+      stop_matches_symbol_ptr[i] = overlap_check_data[i].stop_matches_symbol_ptr;
+      overlap_check_data[i].next_match_ptr_ptr = &next_match_ptr[i];
+      overlap_check_data[i].match_stop_ptr = matches_stop_ptr[i];
+      overlap_check_data[i].num_overlaps = num_candidates;
+      overlap_check_data[i].match_nodes = match_nodes;
+      if (overlap_check_data[i].stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH < first_define_index) {
+        pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_no_defs_thread,
+           (void *)&overlap_check_data[i]);
+      } else {
+        pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_thread, (void *)&overlap_check_data[i]);
+      }
+    }
+  }
+
+  num_overlaps = num_candidates;
+  overlap_check_data[0].match_stop_ptr = matches_stop_ptr[0];
+  for (size_t j = 0 ; j < num_candidates ; j++) {
+    overlap_check_data[0].next[j] = -1;
+  }
+
+  // scan the data, following prefix tree
+  uint8_t found_same_score_prior_match;
+  uint32_t prior_match_number;
+  num_prior_matches = 0;
+  in_symbol_ptr = start_symbol_ptr;
+
+  if (stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH >= first_define_index) {
+main_overlap_check_loop_no_match:
+    symbol = *in_symbol_ptr++;
+    if (in_symbol_ptr >= stop_symbol_ptr)
+      goto main_overlap_check_loop_end;
+    if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+      goto main_overlap_check_loop_no_match;
+    match_node_ptr = child_ptr_array[symbol];
+main_overlap_check_loop_match:
+    symbol = *in_symbol_ptr++;
+    if (symbol != match_node_ptr->symbol) {
+      uint32_t shifted_symbol = symbol;
+      do {
+        if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
+          match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
+          shifted_symbol >>= 4;
+        } else {
+          if (match_node_ptr->miss_ptr == 0) {
+            if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+              goto main_overlap_check_loop_no_match;
+            match_node_ptr = child_ptr_array[symbol];
+            goto main_overlap_check_loop_match;
+          } else {
+            match_node_ptr = match_node_ptr->miss_ptr;
+            shifted_symbol = symbol;
+          }
+        }
+      } while (symbol != match_node_ptr->symbol);
+    }
+    if (match_node_ptr->child_ptr != 0) {
+      match_node_ptr = match_node_ptr->child_ptr;
+      goto main_overlap_check_loop_match;
+    }
+
+    // no child, so found a match - check for overlaps
+    node_score_number = match_node_ptr->score_number;
+    if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
+        && (candidate_bad[node_score_number] == 0)
+        && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
+      *next_match_ptr[0] = node_score_number;
+      next_match_ptr[0]++;
+      *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
+      next_match_ptr[0]++;
+    }
+
+    if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
+        <= prior_match_end_ptr[num_prior_matches - 1])) {
+      if (num_prior_matches == 1) {
+        if (prior_match_score_number[0] != node_score_number) {
+          if (fast_mode == 0) {
+            if (prior_match_score_number[0] > node_score_number)
+              candidate_bad[prior_match_score_number[0]] = 1;
+            else
+              candidate_bad[node_score_number] = 1;
+          } else {
+            uint32_t low_score, high_score;
+            if (node_score_number < prior_match_score_number[0]) {
+              low_score = node_score_number;
+              high_score = prior_match_score_number[0];
+            } else {
+              low_score = prior_match_score_number[0];
+              high_score = node_score_number;
+            }
+            int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
+            while ((*next_overlap_num_ptr != -1)
+                && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+              next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+            if ((*next_overlap_num_ptr == -1)
+                || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
+              if (num_overlaps < 150000) {
+                overlap_check_data[0].second[num_overlaps] = high_score;
+                overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
+                *next_overlap_num_ptr = num_overlaps++;
+              } else
+                candidate_bad[high_score] = 1;
+            }
+          }
+          prior_match_end_ptr[1] = in_symbol_ptr - 1;
+          prior_match_score_number[1] = node_score_number;
+          num_prior_matches = 2;
+        }
+      } else {
+        prior_match_number = 0;
+        found_same_score_prior_match = 0;
+        do {
+          if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
+            num_prior_matches--;
+            for (size_t j = prior_match_number ; j < num_prior_matches ; j++) {
+              prior_match_end_ptr[j] = prior_match_end_ptr[j + 1];
+              prior_match_score_number[j] = prior_match_score_number[j + 1];
+            }
+          } else { // overlapping symbol substitution strings, so invalidate the lower score
+            if (prior_match_score_number[prior_match_number] == node_score_number)
+              found_same_score_prior_match = 1;
+            else if (fast_mode == 0) {
+              if (prior_match_score_number[prior_match_number] > node_score_number)
+                candidate_bad[prior_match_score_number[prior_match_number]] = 1;
+              else
+                candidate_bad[node_score_number] = 1;
+            } else {
+              uint32_t low_score, high_score;
+              if (node_score_number < prior_match_score_number[prior_match_number]) {
+                low_score = node_score_number;
+                high_score = prior_match_score_number[prior_match_number];
+              } else {
+                low_score = prior_match_score_number[prior_match_number];
+                high_score = node_score_number;
+              }
+              int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
+              while ((*next_overlap_num_ptr != -1)
+                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+                next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+              if ((*next_overlap_num_ptr == -1)
+                  || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
+                if (num_overlaps < 150000) {
+                  overlap_check_data[0].second[num_overlaps] = high_score;
+                  overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
+                  *next_overlap_num_ptr = num_overlaps++;
+                } else
+                  candidate_bad[high_score] = 1;
+              }
+            }
+            prior_match_number++;
+          }
+        } while (prior_match_number < num_prior_matches);
+        if (found_same_score_prior_match == 0) {
+          prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
+          prior_match_score_number[num_prior_matches++] = node_score_number;
+        }
+      }
+    } else {
+      num_prior_matches = 1;
+      prior_match_end_ptr[0] = in_symbol_ptr - 1;
+      prior_match_score_number[0] = node_score_number;
+    }
+    match_node_ptr = match_node_ptr->hit_ptr;
+    if (match_node_ptr == 0) {
+      if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+        goto main_overlap_check_loop_no_match;
+      match_node_ptr = child_ptr_array[symbol];
+      goto main_overlap_check_loop_match;
+    }
+    match_node_ptr = match_node_ptr->child_ptr;
+    goto main_overlap_check_loop_match;
+  } else {
+main_overlap_check_no_defs_loop_no_match:
+    symbol = *in_symbol_ptr++;
+    if (in_symbol_ptr >= stop_symbol_ptr)
+      goto main_overlap_check_loop_end;
+    if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+      goto main_overlap_check_no_defs_loop_no_match;
+    match_node_ptr = child_ptr_array[symbol];
+main_overlap_check_no_defs_loop_match:
+    symbol = *in_symbol_ptr++;
+    if (symbol != match_node_ptr->symbol) {
+      uint32_t shifted_symbol = symbol;
+      do {
+        if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
+          match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
+          shifted_symbol >>= 4;
+        } else if (match_node_ptr->miss_ptr == 0) {
+          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+            goto main_overlap_check_no_defs_loop_no_match;
+          if (in_symbol_ptr <= stop_symbol_ptr) {
+            match_node_ptr = child_ptr_array[symbol];
+            goto main_overlap_check_no_defs_loop_match;
+          }
+          goto main_overlap_check_loop_end;
+        } else {
+          match_node_ptr = match_node_ptr->miss_ptr;
+          shifted_symbol = symbol;
+        }
+      } while (symbol != match_node_ptr->symbol);
+    }
+    if (match_node_ptr->child_ptr != 0) {
+      if ((in_symbol_ptr > stop_symbol_ptr) && (in_symbol_ptr - match_node_ptr->num_symbols >= stop_symbol_ptr))
+        goto main_overlap_check_loop_end;
+      match_node_ptr = match_node_ptr->child_ptr;
+      goto main_overlap_check_no_defs_loop_match;
+    }
+
+    // no child, so found a match - check for overlaps
+    node_score_number = match_node_ptr->score_number;
+    if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
+        && (candidate_bad[node_score_number] == 0)
+        && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
+      *next_match_ptr[0] = node_score_number;
+      next_match_ptr[0]++;
+      *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
+      next_match_ptr[0]++;
+    }
+
+    if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
+        <= prior_match_end_ptr[num_prior_matches - 1])) {
+      if (num_prior_matches == 1) {
+        if (prior_match_score_number[0] != node_score_number) {
+          if (fast_mode == 0) {
+            if (prior_match_score_number[0] > node_score_number)
+              candidate_bad[prior_match_score_number[0]] = 1;
+            else
+              candidate_bad[node_score_number] = 1;
+          } else {
+            uint32_t low_score, high_score;
+            if (node_score_number < prior_match_score_number[0]) {
+              low_score = node_score_number;
+              high_score = prior_match_score_number[0];
+            } else {
+              low_score = prior_match_score_number[0];
+              high_score = node_score_number;
+            }
+            int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
+            while ((*next_overlap_num_ptr != -1)
+                && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+              next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+            if ((*next_overlap_num_ptr == -1)
+                || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
+              if (num_overlaps < 150000) {
+                overlap_check_data[0].second[num_overlaps] = high_score;
+                overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
+                *next_overlap_num_ptr = num_overlaps++;
+              } else
+                candidate_bad[high_score] = 1;
+            }
+          }
+          prior_match_end_ptr[1] = in_symbol_ptr - 1;
+          prior_match_score_number[1] = node_score_number;
+          num_prior_matches = 2;
+        }
+      } else {
+        prior_match_number = 0;
+        found_same_score_prior_match = 0;
+        do {
+          if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
+            num_prior_matches--;
+            for (size_t j = prior_match_number ; j < num_prior_matches ; j++) {
+              prior_match_end_ptr[j] = prior_match_end_ptr[j + 1];
+              prior_match_score_number[j] = prior_match_score_number[j + 1];
+            }
+          } else { // overlapping symbol substitution strings, so invalidate the lower score
+            if (prior_match_score_number[prior_match_number] == node_score_number)
+              found_same_score_prior_match = 1;
+            else if (fast_mode == 0) {
+              if (prior_match_score_number[prior_match_number] > node_score_number)
+                candidate_bad[prior_match_score_number[prior_match_number]] = 1;
+              else
+                candidate_bad[node_score_number] = 1;
+            } else {
+              uint32_t low_score, high_score;
+              if (node_score_number < prior_match_score_number[prior_match_number]) {
+                low_score = node_score_number;
+                high_score = prior_match_score_number[prior_match_number];
+              } else {
+                low_score = prior_match_score_number[prior_match_number];
+                high_score = node_score_number;
+              }
+              int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
+              while ((*next_overlap_num_ptr != -1)
+                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+                next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+              if ((*next_overlap_num_ptr == -1)
+                  || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
+                if (num_overlaps < 150000) {
+                  overlap_check_data[0].second[num_overlaps] = high_score;
+                  overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
+                  *next_overlap_num_ptr = num_overlaps++;
+                } else
+                  candidate_bad[high_score] = 1;
+              }
+            }
+            prior_match_number++;
+          }
+        } while (prior_match_number < num_prior_matches);
+        if (found_same_score_prior_match == 0) {
+          prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
+          prior_match_score_number[num_prior_matches++] = node_score_number;
+        }
+      }
+    } else {
+      num_prior_matches = 1;
+      prior_match_end_ptr[0] = in_symbol_ptr - 1;
+      prior_match_score_number[0] = node_score_number;
+    }
+    match_node_ptr = match_node_ptr->hit_ptr;
+    if (match_node_ptr == 0) {
+      if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
+        goto main_overlap_check_no_defs_loop_no_match;
+      }
+      match_node_ptr = child_ptr_array[symbol];
+      goto main_overlap_check_no_defs_loop_match;
+    }
+    if ((in_symbol_ptr <= stop_symbol_ptr) || (in_symbol_ptr - match_node_ptr->num_symbols < stop_symbol_ptr)) {
+      match_node_ptr = match_node_ptr->child_ptr;
+      goto main_overlap_check_no_defs_loop_match;
+    }
+  }
+
+main_overlap_check_loop_end:
+  if (stop_symbol_ptr < end_symbol_ptr) {
+    for (size_t i = 1 ; i < 8 ; i++) {
+      pthread_join(overlap_check_threads[i - 1], NULL);
+    }
+    if (fast_mode == 1) {
+      for (uint16_t candidate_num = 0 ; candidate_num < num_candidates - 1 ; candidate_num++) {
+        if (candidate_bad[candidate_num] == 0) {
+          for (size_t j = 0 ; j < 8 ; j++) {
+            int32_t next_overlap_num = overlap_check_data[j].next[candidate_num];
+            while (next_overlap_num != -1) {
+              candidate_bad[overlap_check_data[j].second[next_overlap_num]] = -1;
+              next_overlap_num = overlap_check_data[j].next[next_overlap_num];
+            }
+          }
+        }
+      }
+    }
+  } else if (fast_mode == 1) {
+    for (uint16_t candidate_num = 0 ; candidate_num < num_candidates - 1 ; candidate_num++) {
+      if (candidate_bad[candidate_num] == 0) {
+        int32_t next_overlap_num = overlap_check_data[0].next[candidate_num];
+        while (next_overlap_num != -1) {
+          candidate_bad[overlap_check_data[0].second[next_overlap_num]] = -1;
+          next_overlap_num = overlap_check_data[0].next[next_overlap_num];
+        }
+      }
+    }
+  }
+
+    
+  for (size_t i = 0, j = next_new_symbol_number; i < num_candidates ; i++) {
+    if (candidate_bad[i] == 0) {
+      symbol_counts[j] = 0;
+      new_rule_number[i] = j++;
+    }
+  }
+    
+
+  in_symbol_ptr = out_symbol_ptr = start_symbol_ptr;
+  int32_t prior_match_end = -1;
+  uint8_t max_i = stop_symbol_ptr < end_symbol_ptr ? 7 : 0;
+  for (size_t i = 0 ; i <= max_i ; i++) {
+    for (size_t j = 0 ; j < (next_match_ptr[i] - next_match_start_ptr[i]) >> 1 ; j++) {
+      uint16_t candidate_num = *(next_match_start_ptr[i] + 2 * j);
+      if (candidate_bad[candidate_num] == 0) {
+        uint32_t start_index = *(next_match_start_ptr[i] + 2 * j + 1);
+        if ((int32_t)start_index > prior_match_end) {
+          prior_match_end = start_index + candidates[candidate_num].num_symbols - 1;
+          uint32_t *start_ptr = start_symbol_ptr + start_index;
+          while (in_symbol_ptr < start_ptr)
+            *out_symbol_ptr++ = *in_symbol_ptr++;
+          *out_symbol_ptr++ = new_rule_number[candidate_num];
+          symbol_counts[new_rule_number[candidate_num]]++;
+          in_symbol_ptr += candidates[candidate_num].num_symbols;
+        }
+      }
+    }
+  }
+  while (in_symbol_ptr < end_symbol_ptr) {
+    *out_symbol_ptr++ = *in_symbol_ptr++;
+  }
+
+  // Add new production rules and update symbol counts
+  for (size_t i = 0 ; i < num_candidates ; i++) {
+    if (candidate_bad[i] == 0) {
+      *out_symbol_ptr++ = num_rules + 0x80000001;
+      uint32_t *match_string_ptr, *match_string_end_ptr;
+      match_string_ptr = match_strings + max_match_length * i;
+      match_string_end_ptr = match_string_ptr + candidates[i].num_symbols;
+      uint32_t sym1 = *match_string_ptr++;
+      *out_symbol_ptr++ = sym1;
+      symbol_ends[num_terminals + num_rules].start = symbol_ends[sym1].start;
+      uint32_t repeats = symbol_counts[num_terminals + num_rules] - 1;
+      symbol_counts[sym1] -= repeats;
+      while (match_string_ptr != match_string_end_ptr) {
+        uint32_t sym2 = *match_string_ptr;
+        symbol_counts[sym2] -= repeats;
+        o1c[symbol_ends[sym1].end][symbol_ends[sym2].start] -= repeats;
+        num_ends[symbol_ends[sym1].end] -= repeats;
+        num_starts[symbol_ends[sym2].start] -= repeats;
+        sym1 = sym2;
+        *out_symbol_ptr++ = *match_string_ptr++;
+      }
+      symbol_ends[num_terminals + num_rules++].end = symbol_ends[sym1].end;
+    } else
+      candidate_bad[i] = 0;
+  }
+
+  if (num_rules == 0) {
+    first_define_index = out_symbol_ptr - start_symbol_ptr;
+  } else {
+    if (out_symbol_ptr < start_symbol_ptr + first_define_index)
+      first_define_index = out_symbol_ptr - start_symbol_ptr; 
+    if (*(start_symbol_ptr + first_define_index) != 0x80000001)
+      while (*(start_symbol_ptr + --first_define_index) != 0x80000001); // decrement index until found
+  }
+  end_symbol_ptr = out_symbol_ptr;
+  *end_symbol_ptr = 0xFFFFFFFE;
+  num_file_symbols = end_symbol_ptr - start_symbol_ptr;
+
+  if (fast_mode == 0) {
+    if (scan_mode == GLZA_SCAN_RETRY) {
+#undef num_candidates
+      uint16_t rank_num_candidates = rank_scores_data_ptr->num_candidates;
+#define num_candidates (*p_num_candidates)
+      if (rank_num_candidates != 0) {
+        if (rank_num_candidates == (uint16_t)max_scores) {
+          if (min_score < prior_min_score) {
+            if (max_scores > 10000)
+              new_min_score = min_score + min_score - prior_min_score - 0.015;
+            else {
+              new_min_score = min_score + min_score - prior_min_score - 0.1;
+              if (new_min_score < min_score - 1.0)
+                new_min_score = min_score - 1.0;
+              if (new_min_score < 0.0)
+                new_min_score = 0.0;
+            }
+            prior_min_score = min_score;
+          } else {
+            new_min_score = 0.5 * (prior_min_score + min_score) - 0.1;
+            if (new_min_score >= prior_min_score)
+              new_min_score = prior_min_score - 0.05;
+            if (new_min_score < min_score)
+              new_min_score = min_score - 0.09;
+            prior_min_score = candidates[candidates_index[num_candidates - 1]].score;
+          }
+          min_score = new_min_score;
+        } else if (min_score < prior_min_score) {
+          new_min_score = min_score + min_score - prior_min_score - 0.15;
+          prior_min_score = min_score;
+          min_score = new_min_score;
+        } else {
+          new_min_score = min_score + min_score - prior_min_score - 0.15;
+          if (new_min_score < prior_min_score)
+            min_score = new_min_score;
+          else
+            min_score = prior_min_score - 0.03;
+        }
+        if (min_score < 0.0)
+          min_score = 0.0;
+      } else if (min_score > 0.0) {
+        prior_min_score = min_score;
+        min_score = 0.0;
+        num_candidates = 1;
+      }
+    } else {
+      scan_mode = GLZA_SCAN_RETRY;
+      prior_min_score = min_score;
+      min_score = 0.25 * min_score;
+      if (min_score < 10.0)
+        min_score = 10.0;
+    }
+  } else if (scan_mode == GLZA_SCAN_RETRY) {
+    if (num_candidates == (uint16_t)max_scores) {
+      if (min_score < prior_min_score) {
+        if (prior_min_score != BIG_FLOAT) {
+          if (scan_cycle > 50) {
+            if (scan_cycle > 100) {
+              if (max_scores == MAX_SCORES_FAST)
+                new_min_score = 0.995 * min_score * (min_score / prior_min_score) - 0.002;
+              else
+                new_min_score = 0.998 * min_score * (min_score / prior_min_score) - 0.002;
+            } else
+              new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.002;
+          } else
+            new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.002;
+          prior_min_score = min_score;
+          min_score = new_min_score;
+        } else {
+          prior_min_score = min_score;
+          min_score *= 0.5;
+        }
+      } else
+        min_score = 0.95 * prior_min_score - 0.002;
+    } else if (min_score < prior_min_score) {
+      if (prior_min_score != BIG_FLOAT) {
+        new_min_score = 0.95 * min_score * (min_score / prior_min_score) - 0.002;
+        prior_min_score = min_score;
+        min_score = new_min_score;
+      } else {
+        prior_min_score = min_score;
+        min_score *= 0.5;
+      }
+    } else
+      min_score = 0.95 * prior_min_score - 0.002;
+    if (min_score > 0.9 * section_scores[fast_section]) {
+      if ((0.9 * section_scores[fast_section] < fast_min_score) && (min_score >= fast_min_score))
+        min_score = fast_min_score;
+      else
+        min_score = 0.9 * section_scores[fast_section];
+    } else if (min_score < 0.0)
+      min_score = 0.0;
+  } else {
+    scan_mode = GLZA_SCAN_RETRY;
+  }
+
+  *p_symbol = symbol;
+#undef num_candidates
+#undef scan_mode
+#undef num_rules
+#undef first_define_index
+#undef in_symbol_ptr
+#undef overlap_check_data
+#undef overlap_check_heap_buf
+#undef match_strings
+#undef num_match_nodes
+#undef max_match_length
+#undef fast_section
+#undef fast_sections
+#undef section_repeats
+#undef prior_min_score
+#undef fast_min_score
+#undef new_min_score
+}
+
 void main_loop(
   uint32_t* p_num_rules,
   enum glza_scan_mode scan_mode,
@@ -3748,7 +4738,6 @@ void main_loop(
   uint32_t best_score_num_symbols; /* symbol count while rebuilding prefix tree (starts at 2) */
   uint32_t num_overlaps;        /* slots used in overlap_check_data[0].second[]; fast_mode==1 only */
   uint32_t prior_match_score_number[MAX_PRIOR_MATCHES]; /* overlapping-match stack; size num_prior_matches */
-  uint32_t new_rule_number[0x8000]; /* maps candidate index -> new symbol id; heuristic cap 0x8000, logical size num_candidates */
   uint32_t *previous_in_symbol_ptr; /* word-substitution loop: start of current output run */
   uint32_t *out_symbol_ptr;         /* compaction write cursor during substitution */
   uint32_t *stop_symbol_ptr;        /* end of scan slice for overlap/substitution (may be < end_symbol_ptr) */
@@ -3760,7 +4749,6 @@ void main_loop(
   uint32_t *match_strings;        /* saved RHS copies; array size num_candidates * max_match_length (heap layout) */
   uint32_t *substitute_data;      /* word-pass command buffer; capacity substitute_data_limit (0x40000) */
   uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES]; /* end positions paired with prior_match_score_number[] */
-  uint32_t *stop_matches_symbol_ptr[8]; /* per-thread: don't record matches at/after this pointer */
   int32_t* base_node_child_num_ptr; /* cursor into base_nodes_child_node_num during word-tree init */
   uint16_t num_candidates;        /* candidates accepted this pass (<= max_scores, <= max_rules headroom) */
   uint16_t node_ptrs_num;         /* rank_scores_buffer fill level / sync counter for rank thread */
@@ -3784,7 +4772,6 @@ void main_loop(
   struct match_node *match_node_ptr; /* cursor in prefix tree during overlap/substitution walks */
 
   pthread_t build_tree_threads[7];       /* fast_mode==0: 6 workers; fast_mode==1: 7 workers */
-  pthread_t overlap_check_threads[7];    /* threads 1..7 of overlap_check_data[] */
   pthread_t rank_scores_thread1;         /* rank_scores_thread (slow) or rank_scores_thread_fast */
 
   uint32_t* in_symbol_ptr = *p_in_symbol_ptr;
@@ -3917,890 +4904,46 @@ void main_loop(
     prior_cycle_symbols = in_symbol_ptr - start_cycle_symbol_ptr;
 
     if (num_candidates == 0) {
-      if (fast_mode == 0) {
-#ifdef PRINTON
-        fprintf(stderr, "\r");
-#endif
-      }
-      if (scan_mode == GLZA_SCAN_RETRY) {
-        if (min_score > 0.0) {
-          num_candidates = 1;
-          prior_min_score = min_score;
-          min_score = 0.0;
-        } else if (fast_sections != 1) {
-          if (fast_sections == 23) {
-            fast_sections = 9;
-            fast_section = 0;
-            min_score = 8.0;
-          } else {
-            fast_sections = (fast_sections + 1) >> 1;
-            fast_section >>= 1;
-            min_score = 4.0;
-          }
-          prior_min_score = BIG_FLOAT;
-          fast_min_score = 1.0;
-
-          num_candidates = 1;
-          scan_mode = GLZA_SCAN_GENERAL;
-        }
-      } else {
-        scan_mode = GLZA_SCAN_RETRY;
-        num_candidates = 1;
-        prior_min_score = min_score;
-        min_score = 0.25 * min_score;
-      }
+      handle_zero_candidates(
+        &scan_mode,
+        &num_candidates,
+        &prior_min_score,
+        &fast_section,
+        &fast_sections,
+        &fast_min_score
+      );
     } else {
-      free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
-      uintptr_t match_region_end_limit = (uintptr_t)end_RAM_ptr;
-      if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
-        match_region_end_limit = (uintptr_t)nodes;
-      struct node_score_data * tmp_candidates = (struct node_score_data *)free_RAM_ptr;
-      memcpy(&tmp_candidates[0], &candidates[0], MAX_SCORES_FAST * sizeof(struct node_score_data));
-      for (uint16_t candidate_num = 0 ; candidate_num < MAX_SCORES_FAST ; candidate_num++)
-        memcpy(&candidates[candidate_num], &tmp_candidates[candidates_index[candidate_num]],
-            sizeof(struct node_score_data));
-
-      if (fast_mode == 0) {
-#ifdef PRINTON
-        fprintf(stderr, " score[0-%hu] = %.5f-%.5f\n", (unsigned short int)num_candidates - 1,
-            candidates[0].score, candidates[num_candidates - 1].score);
-#endif
-        if (candidates[num_candidates - 1].score < 0.1 * candidates[0].score - 1.0) {
-          size_t candidate_num = 1;
-          while ((candidate_num + 0x100 < num_candidates)
-              && (candidates[candidate_num + 0x100].score >= 0.1 * candidates[0].score - 1.0))
-            candidate_num += 0x100;
-          while (candidate_num < num_candidates) {
-            if (candidates[candidate_num].score < 0.1 * candidates[0].score - 1.0) {
-              num_candidates = candidate_num;
-              break;
-            }
-            candidate_num++;
-          }
-        }
-      } else if (fast_sections != 1) {
-        section_scores[fast_section] = candidates[num_candidates - 1].score;
-        uint8_t old_fast_section = fast_section; 
-        if (++fast_section == fast_sections)
-          fast_section = 0;
-        if (candidates[num_candidates - 1].score < fast_min_score) {
-          if (fast_sections == 23) {
-            fast_sections = 9;
-            fast_section = 0;
-            min_score = 8.0;
-          } else {
-            fast_sections = (fast_sections + 1) >> 1;
-            fast_section >>= 1;
-            min_score = 4.0;
-          }
-          section_repeats = 0;
-          for (i = 0 ; i < fast_sections ; i++)
-            section_scores[i] = BIG_FLOAT;
-          prior_min_score = BIG_FLOAT;
-          fast_min_score = 1.0;
-          scan_mode = GLZA_SCAN_GENERAL;
-        } else {
-          i = fast_section + 1;
-          if (i == fast_sections)
-            i = 0;
-          while (i != old_fast_section) {
-            if (section_scores[i] > section_scores[fast_section])
-              fast_section = i;
-            if (++i == fast_sections)
-              i = 0;
-          }
-          if ((section_repeats < 2) && (section_scores[old_fast_section] > section_scores[fast_section])) {
-            fast_section = old_fast_section;
-            section_repeats++;
-          } else
-            section_repeats = 0;
-        }
-      }
-
-      if (next_new_symbol_number + num_candidates > max_rules) {
-        num_candidates = max_rules > next_new_symbol_number
-                       ? max_rules - next_new_symbol_number
-                       : 0;
-      }
-
-      // build a prefix tree of the match strings
-      child_ptr_array = (struct match_node **)free_RAM_ptr;
-      struct match_node * match_nodes = (struct match_node *)(free_RAM_ptr
-          + sizeof(struct match_node *) * next_new_symbol_number);
-      uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
-          / sizeof(struct match_node));
-      num_match_nodes = 0;
-      max_match_length = 0;
-      {
-        uint16_t candidate_num = 0;
-        while (candidate_num < num_candidates) {
-          if ((uintptr_t)match_nodes + (num_match_nodes + 1) * sizeof(struct match_node)
-              + (uintptr_t)(candidate_num + 1) * max_match_length * sizeof(uint32_t) >= match_region_end_limit) {
-            num_candidates = candidate_num != 0
-                           ? candidate_num - 1
-                           : 0;
-            break;
-          }
-          uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
-          if (candidates[candidate_num].num_symbols > max_match_length)
-            max_match_length = candidates[candidate_num].num_symbols;
-          best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
-          best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
-          if (num_match_nodes == 0) {
-            init_match_node(match_nodes, *best_score_match_ptr, 0, candidate_num);
-            num_match_nodes = 1;
-          }
-          match_node_ptr = match_nodes;
-          while (best_score_match_ptr <= best_score_last_match_ptr) {
-            symbol = *best_score_match_ptr;
-            if (match_node_ptr->child_ptr == 0) {
-              if (num_match_nodes >= match_nodes_limit) {
-                candidate_bad[candidate_num] = 1;
-                break;
-              }
-              match_node_ptr->child_ptr = &match_nodes[num_match_nodes++];
-              match_node_ptr = match_node_ptr->child_ptr;
-              init_match_node(match_node_ptr, symbol, 0, candidate_num);
-            } else {
-              match_node_ptr = match_node_ptr->child_ptr;
-              uint8_t sibling_number;
-              if (move_to_match_sibling(match_nodes, &match_node_ptr, symbol, &sibling_number) != 0) {
-                if (match_node_ptr->child_ptr == 0) {
-                  candidate_bad[candidate_num] = 1;
-                  break;
-                }
-              } else {
-                if (num_match_nodes >= match_nodes_limit) {
-                  candidate_bad[candidate_num] = 1;
-                  break;
-                }
-                match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
-                match_node_ptr = &match_nodes[num_match_nodes++];
-                init_match_node(match_node_ptr, symbol, 0, candidate_num);
-              }
-            }
-            best_score_match_ptr++;
-          }
-          if (match_node_ptr->child_ptr != 0)
-            candidate_bad[candidate_num] = 1;
-          candidate_num++;
-        }
-      }
-
-      // for each candidate, search substrings for matches with other candidates, if found invalidate lower score
-      {
-        uint16_t candidate_num = 0;
-        while (candidate_num < num_candidates) {
-          uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
-          best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
-          best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
-          // read the first symbol
-          symbol = *best_score_match_ptr++;
-          match_node_ptr = &match_nodes[1];
-          move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
-          while (best_score_match_ptr <= best_score_last_match_ptr) {
-            // starting with the second symbol, look for suffixes that are in the prefix tree
-            search_match_ptr = best_score_match_ptr;
-            struct match_node * search_node_ptr = match_nodes;
-            while (1) { // follow the tree until find child = 0 or sibling = 0
-              if (search_node_ptr->child_ptr == 0) { // found a scored string that is a substring of this string
-                if (fast_mode == 0) {
-                  if (search_node_ptr->score_number > candidate_num)
-                    candidate_bad[search_node_ptr->score_number] = 1;
-                  else if (search_node_ptr->score_number != candidate_num)
-                    candidate_bad[candidate_num] = 1;
-                  break;
-                } else {
-                  if (search_node_ptr->score_number > candidate_num) {
-                    if (candidate_bad[candidate_num] == 0)
-                      candidate_bad[search_node_ptr->score_number] = 1;
-                  } else if (search_node_ptr->score_number != candidate_num) {
-                    if (candidate_bad[search_node_ptr->score_number] == 0)
-                      candidate_bad[candidate_num] = 1;
-                  }
-                  break;
-                }
-              }
-              search_node_ptr = search_node_ptr->child_ptr;
-              symbol = *search_match_ptr;
-              if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
-                break;
-              match_node_ptr->miss_ptr = search_node_ptr;
-              search_match_ptr++;
-            }
-            symbol = *best_score_match_ptr++;
-          }
-          candidate_num++;
-        }
-      }
-
-      // Redo the tree build and miss values with just the valid score symbols
-      match_node_ptr = match_nodes + next_new_symbol_number;
-      num_match_nodes = 0;
-      size_t j = next_new_symbol_number;
-      while (j-- != 0)
-        child_ptr_array[j] = 0;
-      {
-        uint16_t candidate_num = 0;
-        while (candidate_num < num_candidates) {
-          if (candidate_bad[candidate_num] == 0) {
-            uint32_t *best_score_last_match_ptr, *best_score_match_ptr;
-            best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
-            best_score_match_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
-            struct match_node ** child_ptr_ptr = &child_ptr_array[*best_score_match_ptr++];
-            symbol = *best_score_match_ptr++;
-            best_score_num_symbols = 2;
-            match_node_ptr = move_to_base_match_child_with_make(match_nodes, symbol, candidate_num, &num_match_nodes,
-                child_ptr_ptr);
-            while (best_score_match_ptr <= best_score_last_match_ptr)
-              move_to_match_child_with_make(match_nodes, &match_node_ptr, *best_score_match_ptr++, candidate_num,
-                  ++best_score_num_symbols, &num_match_nodes);
-          }
-          candidate_num++;
-        }
-      }
-
-      // span nodes entering the longest (first) suffix match for each node
-      {
-        uint16_t candidate_num = 0;
-        while (candidate_num < num_candidates) {
-          if (candidate_bad[candidate_num] == 0) {
-            uint32_t *best_score_last_match_ptr, *best_score_suffix_ptr;
-            best_score_last_match_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index;
-            best_score_suffix_ptr = best_score_last_match_ptr - candidates[candidate_num].num_symbols + 1;
-            suffix_node_number = child_ptr_array[*best_score_suffix_ptr++] - match_nodes;
-            // starting at the node of the 2nd symbol in string, match strings with prefix tree until no match found,
-            //   for each match node found, if suffix miss symbol is zero, set it to the tree symbol node
-            while (best_score_suffix_ptr <= best_score_last_match_ptr) {
-              // follow the suffix until the end (or break on no tree matches)
-              symbol = *best_score_suffix_ptr++;
-              uint32_t shifted_symbol = symbol;
-              while (symbol != match_nodes[suffix_node_number].symbol) {
-                suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_symbol & 0xF];
-                shifted_symbol >>= 4;
-              }
-              match_node_ptr = &match_nodes[suffix_node_number];
-              uint32_t *best_score_match_ptr;
-              best_score_match_ptr = best_score_suffix_ptr;
-              if ((uint32_t)symbol < child_ptr_array_size && child_ptr_array[symbol] != 0) {
-                if ((match_node_ptr->child_ptr != 0) && (match_node_ptr->child_ptr->miss_ptr == 0))
-                  write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, child_ptr_array[symbol]);
-                struct match_node * search_node_ptr = child_ptr_array[symbol];
-                while (best_score_match_ptr <= best_score_last_match_ptr) {
-                  // follow the tree until end of match string or find child = 0 or sibling = 0
-                  symbol = *best_score_match_ptr++;
-                  match_node_ptr = match_node_ptr->child_ptr;
-                  move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
-                  if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
-                    break;
-                  if (match_node_ptr->child_ptr == 0) {
-                    if (match_node_ptr->hit_ptr == 0)
-                      match_node_ptr->hit_ptr = search_node_ptr;
-                  } else if (match_node_ptr->child_ptr->miss_ptr == 0)
-                    write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, search_node_ptr->child_ptr);
-                  if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
-                    break;
-                  search_node_ptr = search_node_ptr->child_ptr;
-                }
-              }
-              suffix_node_number = match_nodes[suffix_node_number].child_ptr - match_nodes;
-            }
-          }
-          candidate_num++;
-        }
-      }
-
-      // save the match strings so they can be added to the end of the data after symbol substitution is done
-      match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
-      overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
-      if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
-        if (overlap_check_heap_buf == 0) {
-          overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
-          if (overlap_check_heap_buf == 0) {
-            fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-            exit(1);
-          }
-        }
-        overlap_check_data = overlap_check_heap_buf;
-      }
-      for (size_t i = 1 ; i < 8 ; i++)
-        overlap_check_data[i].candidate_bad = &candidate_bad[0];
-
-      {
-        uint16_t candidate_num = 0;
-        while (candidate_num < num_candidates) {
-          if (candidate_bad[candidate_num] == 0) {
-            match_string_start_ptr = &match_strings[candidate_num * max_match_length];
-            node_string_start_ptr = start_symbol_ptr + candidates[candidate_num].last_match_index
-                - candidates[candidate_num].num_symbols + 1;
-            for (size_t j = 0 ; j < candidates[candidate_num].num_symbols ; j++)
-              *(match_string_start_ptr + j) = *(node_string_start_ptr + j);
-          }
-          candidate_num++;
-        }
-      }
-
-      uint32_t *matches_start_ptr[8], *next_match_start_ptr[8], *matches_stop_ptr[8];
-      uintptr_t match_strings_end = ((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7;
-      uint32_t *begin_matches;
-      uint32_t *matches_end_ptr;
-      if (overlap_check_data == overlap_check_heap_buf) {
-        begin_matches = (uint32_t *)match_strings_end;
-        matches_end_ptr = (uint32_t *)match_region_end_limit;
-      } else {
-        begin_matches = (uint32_t *)((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check));
-        matches_end_ptr = (uint32_t *)end_RAM_ptr;
-      }
-      if (begin_matches >= matches_end_ptr)
-        begin_matches = matches_end_ptr;
-      {
-        uint32_t matches_stride = (uint32_t)((matches_end_ptr - begin_matches) >> 3);
-        for (i = 0 ; i < 8 ; i++) {
-          next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + i * matches_stride;
-          matches_stop_ptr[i] = begin_matches + (i + 1) * matches_stride;
-          next_match_ptr[i] = next_match_start_ptr[i];
-        }
-      }
-
-      if (fast_mode == 0) {
-#ifdef PRINTON
-        fprintf(stderr, "Overlap search\r");
-#endif
-      }
-      block_size = num_file_symbols >> 3;
-      block_ptr = start_symbol_ptr + block_size;
-      stop_matches_symbol_ptr[0] = block_ptr;
-      stop_symbol_ptr = block_ptr + MAX_MATCH_LENGTH;
-      if (stop_symbol_ptr >= end_symbol_ptr) {
-        stop_symbol_ptr = end_symbol_ptr;
-        stop_matches_symbol_ptr[0] = end_symbol_ptr;
-      } else {
-        for (size_t i = 1 ; i < 8 ; i++) {
-          overlap_check_data[i].start_symbol_ptr = block_ptr;
-          block_ptr += block_size;
-          if (i < 7) {
-            overlap_check_data[i].stop_matches_symbol_ptr = block_ptr;
-            overlap_check_data[i].stop_symbol_ptr = block_ptr + MAX_MATCH_LENGTH;
-            if (overlap_check_data[i].stop_symbol_ptr > end_symbol_ptr)
-              overlap_check_data[i].stop_symbol_ptr = end_symbol_ptr;
-          } else {
-            overlap_check_data[7].stop_matches_symbol_ptr = end_symbol_ptr;
-            overlap_check_data[7].stop_symbol_ptr = end_symbol_ptr;
-          }
-          stop_matches_symbol_ptr[i] = overlap_check_data[i].stop_matches_symbol_ptr;
-          overlap_check_data[i].next_match_ptr_ptr = &next_match_ptr[i];
-          overlap_check_data[i].match_stop_ptr = matches_stop_ptr[i];
-          overlap_check_data[i].num_overlaps = num_candidates;
-          overlap_check_data[i].match_nodes = match_nodes;
-          if (overlap_check_data[i].stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH < first_define_index) {
-            pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_no_defs_thread,
-               (void *)&overlap_check_data[i]);
-          } else {
-            pthread_create(&overlap_check_threads[i - 1], NULL, overlap_check_thread, (void *)&overlap_check_data[i]);
-          }
-        }
-      }
-
-      num_overlaps = num_candidates;
-      overlap_check_data[0].match_stop_ptr = matches_stop_ptr[0];
-      for (size_t j = 0 ; j < num_candidates ; j++) {
-        overlap_check_data[0].next[j] = -1;
-      }
-
-      // scan the data, following prefix tree
-      uint8_t found_same_score_prior_match;
-      uint32_t prior_match_number;
-      num_prior_matches = 0;
-      in_symbol_ptr = start_symbol_ptr;
-
-      if (stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH >= first_define_index) {
-main_overlap_check_loop_no_match:
-        symbol = *in_symbol_ptr++;
-        if (in_symbol_ptr >= stop_symbol_ptr)
-          goto main_overlap_check_loop_end;
-        if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
-          goto main_overlap_check_loop_no_match;
-        match_node_ptr = child_ptr_array[symbol];
-main_overlap_check_loop_match:
-        symbol = *in_symbol_ptr++;
-        if (symbol != match_node_ptr->symbol) {
-          uint32_t shifted_symbol = symbol;
-          do {
-            if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
-              match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
-              shifted_symbol >>= 4;
-            } else {
-              if (match_node_ptr->miss_ptr == 0) {
-                if (((int32_t)symbol < 0) || ((uint32_t)symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
-                  goto main_overlap_check_loop_no_match;
-                match_node_ptr = child_ptr_array[symbol];
-                goto main_overlap_check_loop_match;
-              } else {
-                match_node_ptr = match_node_ptr->miss_ptr;
-                shifted_symbol = symbol;
-              }
-            }
-          } while (symbol != match_node_ptr->symbol);
-        }
-        if (match_node_ptr->child_ptr != 0) {
-          match_node_ptr = match_node_ptr->child_ptr;
-          goto main_overlap_check_loop_match;
-        }
-
-        // no child, so found a match - check for overlaps
-        node_score_number = match_node_ptr->score_number;
-        if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
-            && (candidate_bad[node_score_number] == 0)
-            && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
-          *next_match_ptr[0] = node_score_number;
-          next_match_ptr[0]++;
-          *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
-          next_match_ptr[0]++;
-        }
-
-        if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
-            <= prior_match_end_ptr[num_prior_matches - 1])) {
-          if (num_prior_matches == 1) {
-            if (prior_match_score_number[0] != node_score_number) {
-              if (fast_mode == 0) {
-                if (prior_match_score_number[0] > node_score_number)
-                  candidate_bad[prior_match_score_number[0]] = 1;
-                else
-                  candidate_bad[node_score_number] = 1;
-              } else {
-                uint32_t low_score, high_score;
-                if (node_score_number < prior_match_score_number[0]) {
-                  low_score = node_score_number;
-                  high_score = prior_match_score_number[0];
-                } else {
-                  low_score = prior_match_score_number[0];
-                  high_score = node_score_number;
-                }
-                int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
-                while ((*next_overlap_num_ptr != -1)
-                    && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
-                  next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
-                if ((*next_overlap_num_ptr == -1)
-                    || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
-                  if (num_overlaps < 150000) {
-                    overlap_check_data[0].second[num_overlaps] = high_score;
-                    overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
-                    *next_overlap_num_ptr = num_overlaps++;
-                  } else
-                    candidate_bad[high_score] = 1;
-                }
-              }
-              prior_match_end_ptr[1] = in_symbol_ptr - 1;
-              prior_match_score_number[1] = node_score_number;
-              num_prior_matches = 2;
-            }
-          } else {
-            prior_match_number = 0;
-            found_same_score_prior_match = 0;
-            do {
-              if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
-                num_prior_matches--;
-                for (size_t j = prior_match_number ; j < num_prior_matches ; j++) {
-                  prior_match_end_ptr[j] = prior_match_end_ptr[j + 1];
-                  prior_match_score_number[j] = prior_match_score_number[j + 1];
-                }
-              } else { // overlapping symbol substitution strings, so invalidate the lower score
-                if (prior_match_score_number[prior_match_number] == node_score_number)
-                  found_same_score_prior_match = 1;
-                else if (fast_mode == 0) {
-                  if (prior_match_score_number[prior_match_number] > node_score_number)
-                    candidate_bad[prior_match_score_number[prior_match_number]] = 1;
-                  else
-                    candidate_bad[node_score_number] = 1;
-                } else {
-                  uint32_t low_score, high_score;
-                  if (node_score_number < prior_match_score_number[prior_match_number]) {
-                    low_score = node_score_number;
-                    high_score = prior_match_score_number[prior_match_number];
-                  } else {
-                    low_score = prior_match_score_number[prior_match_number];
-                    high_score = node_score_number;
-                  }
-                  int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
-                  while ((*next_overlap_num_ptr != -1)
-                      && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
-                    next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
-                  if ((*next_overlap_num_ptr == -1)
-                      || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
-                    if (num_overlaps < 150000) {
-                      overlap_check_data[0].second[num_overlaps] = high_score;
-                      overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
-                      *next_overlap_num_ptr = num_overlaps++;
-                    } else
-                      candidate_bad[high_score] = 1;
-                  }
-                }
-                prior_match_number++;
-              }
-            } while (prior_match_number < num_prior_matches);
-            if (found_same_score_prior_match == 0) {
-              prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
-              prior_match_score_number[num_prior_matches++] = node_score_number;
-            }
-          }
-        } else {
-          num_prior_matches = 1;
-          prior_match_end_ptr[0] = in_symbol_ptr - 1;
-          prior_match_score_number[0] = node_score_number;
-        }
-        match_node_ptr = match_node_ptr->hit_ptr;
-        if (match_node_ptr == 0) {
-          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
-            goto main_overlap_check_loop_no_match;
-          match_node_ptr = child_ptr_array[symbol];
-          goto main_overlap_check_loop_match;
-        }
-        match_node_ptr = match_node_ptr->child_ptr;
-        goto main_overlap_check_loop_match;
-      } else {
-main_overlap_check_no_defs_loop_no_match:
-        symbol = *in_symbol_ptr++;
-        if (in_symbol_ptr >= stop_symbol_ptr)
-          goto main_overlap_check_loop_end;
-        if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
-          goto main_overlap_check_no_defs_loop_no_match;
-        match_node_ptr = child_ptr_array[symbol];
-main_overlap_check_no_defs_loop_match:
-        symbol = *in_symbol_ptr++;
-        if (symbol != match_node_ptr->symbol) {
-          uint32_t shifted_symbol = symbol;
-          do {
-            if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
-              match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
-              shifted_symbol >>= 4;
-            } else if (match_node_ptr->miss_ptr == 0) {
-              if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
-                goto main_overlap_check_no_defs_loop_no_match;
-              if (in_symbol_ptr <= stop_symbol_ptr) {
-                match_node_ptr = child_ptr_array[symbol];
-                goto main_overlap_check_no_defs_loop_match;
-              }
-              goto main_overlap_check_loop_end;
-            } else {
-              match_node_ptr = match_node_ptr->miss_ptr;
-              shifted_symbol = symbol;
-            }
-          } while (symbol != match_node_ptr->symbol);
-        }
-        if (match_node_ptr->child_ptr != 0) {
-          if ((in_symbol_ptr > stop_symbol_ptr) && (in_symbol_ptr - match_node_ptr->num_symbols >= stop_symbol_ptr))
-            goto main_overlap_check_loop_end;
-          match_node_ptr = match_node_ptr->child_ptr;
-          goto main_overlap_check_no_defs_loop_match;
-        }
-
-        // no child, so found a match - check for overlaps
-        node_score_number = match_node_ptr->score_number;
-        if ((in_symbol_ptr - match_node_ptr->num_symbols < stop_matches_symbol_ptr[0])
-            && (candidate_bad[node_score_number] == 0)
-            && (next_match_ptr[0] + 2 <= matches_stop_ptr[0])) {
-          *next_match_ptr[0] = node_score_number;
-          next_match_ptr[0]++;
-          *next_match_ptr[0] = in_symbol_ptr - start_symbol_ptr - match_node_ptr->num_symbols;
-          next_match_ptr[0]++;
-        }
-
-        if ((num_prior_matches != 0) && (in_symbol_ptr - match_node_ptr->num_symbols
-            <= prior_match_end_ptr[num_prior_matches - 1])) {
-          if (num_prior_matches == 1) {
-            if (prior_match_score_number[0] != node_score_number) {
-              if (fast_mode == 0) {
-                if (prior_match_score_number[0] > node_score_number)
-                  candidate_bad[prior_match_score_number[0]] = 1;
-                else
-                  candidate_bad[node_score_number] = 1;
-              } else {
-                uint32_t low_score, high_score;
-                if (node_score_number < prior_match_score_number[0]) {
-                  low_score = node_score_number;
-                  high_score = prior_match_score_number[0];
-                } else {
-                  low_score = prior_match_score_number[0];
-                  high_score = node_score_number;
-                }
-                int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
-                while ((*next_overlap_num_ptr != -1)
-                    && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
-                  next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
-                if ((*next_overlap_num_ptr == -1)
-                    || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
-                  if (num_overlaps < 150000) {
-                    overlap_check_data[0].second[num_overlaps] = high_score;
-                    overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
-                    *next_overlap_num_ptr = num_overlaps++;
-                  } else
-                    candidate_bad[high_score] = 1;
-                }
-              }
-              prior_match_end_ptr[1] = in_symbol_ptr - 1;
-              prior_match_score_number[1] = node_score_number;
-              num_prior_matches = 2;
-            }
-          } else {
-            prior_match_number = 0;
-            found_same_score_prior_match = 0;
-            do {
-              if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
-                num_prior_matches--;
-                for (size_t j = prior_match_number ; j < num_prior_matches ; j++) {
-                  prior_match_end_ptr[j] = prior_match_end_ptr[j + 1];
-                  prior_match_score_number[j] = prior_match_score_number[j + 1];
-                }
-              } else { // overlapping symbol substitution strings, so invalidate the lower score
-                if (prior_match_score_number[prior_match_number] == node_score_number)
-                  found_same_score_prior_match = 1;
-                else if (fast_mode == 0) {
-                  if (prior_match_score_number[prior_match_number] > node_score_number)
-                    candidate_bad[prior_match_score_number[prior_match_number]] = 1;
-                  else
-                    candidate_bad[node_score_number] = 1;
-                } else {
-                  uint32_t low_score, high_score;
-                  if (node_score_number < prior_match_score_number[prior_match_number]) {
-                    low_score = node_score_number;
-                    high_score = prior_match_score_number[prior_match_number];
-                  } else {
-                    low_score = prior_match_score_number[prior_match_number];
-                    high_score = node_score_number;
-                  }
-                  int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
-                  while ((*next_overlap_num_ptr != -1)
-                      && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
-                    next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
-                  if ((*next_overlap_num_ptr == -1)
-                      || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
-                    if (num_overlaps < 150000) {
-                      overlap_check_data[0].second[num_overlaps] = high_score;
-                      overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
-                      *next_overlap_num_ptr = num_overlaps++;
-                    } else
-                      candidate_bad[high_score] = 1;
-                  }
-                }
-                prior_match_number++;
-              }
-            } while (prior_match_number < num_prior_matches);
-            if (found_same_score_prior_match == 0) {
-              prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
-              prior_match_score_number[num_prior_matches++] = node_score_number;
-            }
-          }
-        } else {
-          num_prior_matches = 1;
-          prior_match_end_ptr[0] = in_symbol_ptr - 1;
-          prior_match_score_number[0] = node_score_number;
-        }
-        match_node_ptr = match_node_ptr->hit_ptr;
-        if (match_node_ptr == 0) {
-          if ((int32_t)symbol < 0 || (uint32_t)symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
-            goto main_overlap_check_no_defs_loop_no_match;
-          }
-          match_node_ptr = child_ptr_array[symbol];
-          goto main_overlap_check_no_defs_loop_match;
-        }
-        if ((in_symbol_ptr <= stop_symbol_ptr) || (in_symbol_ptr - match_node_ptr->num_symbols < stop_symbol_ptr)) {
-          match_node_ptr = match_node_ptr->child_ptr;
-          goto main_overlap_check_no_defs_loop_match;
-        }
-      }
-
-main_overlap_check_loop_end:
-      if (stop_symbol_ptr < end_symbol_ptr) {
-        for (size_t i = 1 ; i < 8 ; i++) {
-          pthread_join(overlap_check_threads[i - 1], NULL);
-        }
-        if (fast_mode == 1) {
-          for (uint16_t candidate_num = 0 ; candidate_num < num_candidates - 1 ; candidate_num++) {
-            if (candidate_bad[candidate_num] == 0) {
-              for (size_t j = 0 ; j < 8 ; j++) {
-                int32_t next_overlap_num = overlap_check_data[j].next[candidate_num];
-                while (next_overlap_num != -1) {
-                  candidate_bad[overlap_check_data[j].second[next_overlap_num]] = -1;
-                  next_overlap_num = overlap_check_data[j].next[next_overlap_num];
-                }
-              }
-            }
-          }
-        }
-      } else if (fast_mode == 1) {
-        for (uint16_t candidate_num = 0 ; candidate_num < num_candidates - 1 ; candidate_num++) {
-          if (candidate_bad[candidate_num] == 0) {
-            int32_t next_overlap_num = overlap_check_data[0].next[candidate_num];
-            while (next_overlap_num != -1) {
-              candidate_bad[overlap_check_data[0].second[next_overlap_num]] = -1;
-              next_overlap_num = overlap_check_data[0].next[next_overlap_num];
-            }
-          }
-        }
-      }
-
-      
-      for (size_t i = 0, j = next_new_symbol_number; i < num_candidates ; i++) {
-        if (candidate_bad[i] == 0) {
-          symbol_counts[j] = 0;
-          new_rule_number[i] = j++;
-        }
-      }
-      
-
-      in_symbol_ptr = out_symbol_ptr = start_symbol_ptr;
-      int32_t prior_match_end = -1;
-      uint8_t max_i = stop_symbol_ptr < end_symbol_ptr ? 7 : 0;
-      for (size_t i = 0 ; i <= max_i ; i++) {
-        for (size_t j = 0 ; j < (next_match_ptr[i] - next_match_start_ptr[i]) >> 1 ; j++) {
-          uint16_t candidate_num = *(next_match_start_ptr[i] + 2 * j);
-          if (candidate_bad[candidate_num] == 0) {
-            uint32_t start_index = *(next_match_start_ptr[i] + 2 * j + 1);
-            if ((int32_t)start_index > prior_match_end) {
-              prior_match_end = start_index + candidates[candidate_num].num_symbols - 1;
-              uint32_t *start_ptr = start_symbol_ptr + start_index;
-              while (in_symbol_ptr < start_ptr)
-                *out_symbol_ptr++ = *in_symbol_ptr++;
-              *out_symbol_ptr++ = new_rule_number[candidate_num];
-              symbol_counts[new_rule_number[candidate_num]]++;
-              in_symbol_ptr += candidates[candidate_num].num_symbols;
-            }
-          }
-        }
-      }
-      while (in_symbol_ptr < end_symbol_ptr)
-        *out_symbol_ptr++ = *in_symbol_ptr++;
-
-      // Add new production rules and update symbol counts
-      for (size_t i = 0 ; i < num_candidates ; i++) {
-        if (candidate_bad[i] == 0) {
-          *out_symbol_ptr++ = num_rules + 0x80000001;
-          uint32_t *match_string_ptr, *match_string_end_ptr;
-          match_string_ptr = match_strings + max_match_length * i;
-          match_string_end_ptr = match_string_ptr + candidates[i].num_symbols;
-          uint32_t sym1 = *match_string_ptr++;
-          *out_symbol_ptr++ = sym1;
-          symbol_ends[num_terminals + num_rules].start = symbol_ends[sym1].start;
-          uint32_t repeats = symbol_counts[num_terminals + num_rules] - 1;
-          symbol_counts[sym1] -= repeats;
-          while (match_string_ptr != match_string_end_ptr) {
-            uint32_t sym2 = *match_string_ptr;
-            symbol_counts[sym2] -= repeats;
-            o1c[symbol_ends[sym1].end][symbol_ends[sym2].start] -= repeats;
-            num_ends[symbol_ends[sym1].end] -= repeats;
-            num_starts[symbol_ends[sym2].start] -= repeats;
-            sym1 = sym2;
-            *out_symbol_ptr++ = *match_string_ptr++;
-          }
-          symbol_ends[num_terminals + num_rules++].end = symbol_ends[sym1].end;
-        } else
-          candidate_bad[i] = 0;
-      }
-
-      if (num_rules == 0) {
-        first_define_index = out_symbol_ptr - start_symbol_ptr;
-      } else {
-        if (out_symbol_ptr < start_symbol_ptr + first_define_index)
-          first_define_index = out_symbol_ptr - start_symbol_ptr; 
-        if (*(start_symbol_ptr + first_define_index) != 0x80000001)
-          while (*(start_symbol_ptr + --first_define_index) != 0x80000001); // decrement index until found
-      }
-      end_symbol_ptr = out_symbol_ptr;
-      *end_symbol_ptr = 0xFFFFFFFE;
-      num_file_symbols = end_symbol_ptr - start_symbol_ptr;
-
-      if (fast_mode == 0) {
-        if (scan_mode == GLZA_SCAN_RETRY) {
-          if (rank_scores_data_ptr->num_candidates != 0) {
-            if (rank_scores_data_ptr->num_candidates == (uint16_t)max_scores) {
-              if (min_score < prior_min_score) {
-                if (max_scores > 10000)
-                  new_min_score = min_score + min_score - prior_min_score - 0.015;
-                else {
-                  new_min_score = min_score + min_score - prior_min_score - 0.1;
-                  if (new_min_score < min_score - 1.0)
-                    new_min_score = min_score - 1.0;
-                  if (new_min_score < 0.0)
-                    new_min_score = 0.0;
-                }
-                prior_min_score = min_score;
-              } else {
-                new_min_score = 0.5 * (prior_min_score + min_score) - 0.1;
-                if (new_min_score >= prior_min_score)
-                  new_min_score = prior_min_score - 0.05;
-                if (new_min_score < min_score)
-                  new_min_score = min_score - 0.09;
-                prior_min_score = candidates[candidates_index[num_candidates - 1]].score;
-              }
-              min_score = new_min_score;
-            } else if (min_score < prior_min_score) {
-              new_min_score = min_score + min_score - prior_min_score - 0.15;
-              prior_min_score = min_score;
-              min_score = new_min_score;
-            } else {
-              new_min_score = min_score + min_score - prior_min_score - 0.15;
-              if (new_min_score < prior_min_score)
-                min_score = new_min_score;
-              else
-                min_score = prior_min_score - 0.03;
-            }
-            if (min_score < 0.0)
-              min_score = 0.0;
-          } else if (min_score > 0.0) {
-            prior_min_score = min_score;
-            min_score = 0.0;
-            num_candidates = 1;
-          }
-        } else {
-          scan_mode = GLZA_SCAN_RETRY;
-          prior_min_score = min_score;
-          min_score = 0.25 * min_score;
-          if (min_score < 10.0)
-            min_score = 10.0;
-        }
-      } else if (scan_mode == GLZA_SCAN_RETRY) {
-        if (num_candidates == (uint16_t)max_scores) {
-          if (min_score < prior_min_score) {
-            if (prior_min_score != BIG_FLOAT) {
-              if (scan_cycle > 50) {
-                if (scan_cycle > 100) {
-                  if (max_scores == MAX_SCORES_FAST)
-                    new_min_score = 0.995 * min_score * (min_score / prior_min_score) - 0.002;
-                  else
-                    new_min_score = 0.998 * min_score * (min_score / prior_min_score) - 0.002;
-                } else
-                  new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.002;
-              } else
-                new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.002;
-              prior_min_score = min_score;
-              min_score = new_min_score;
-            } else {
-              prior_min_score = min_score;
-              min_score *= 0.5;
-            }
-          } else
-            min_score = 0.95 * prior_min_score - 0.002;
-        } else if (min_score < prior_min_score) {
-          if (prior_min_score != BIG_FLOAT) {
-            new_min_score = 0.95 * min_score * (min_score / prior_min_score) - 0.002;
-            prior_min_score = min_score;
-            min_score = new_min_score;
-          } else {
-            prior_min_score = min_score;
-            min_score *= 0.5;
-          }
-        } else
-          min_score = 0.95 * prior_min_score - 0.002;
-        if (min_score > 0.9 * section_scores[fast_section]) {
-          if ((0.9 * section_scores[fast_section] < fast_min_score) && (min_score >= fast_min_score))
-            min_score = fast_min_score;
-          else
-            min_score = 0.9 * section_scores[fast_section];
-        } else if (min_score < 0.0)
-          min_score = 0.0;
-      } else
-        scan_mode = GLZA_SCAN_RETRY;
+      process_ranked_candidates(
+        &num_candidates,
+        &scan_mode,
+        next_new_symbol_number,
+        max_rules,
+        max_scores,
+        &num_rules,
+        &first_define_index,
+        &in_symbol_ptr,
+        &symbol,
+        candidates_index,
+        candidate_bad,
+        end_RAM_ptr,
+        rank_scores_data_ptr,
+        &overlap_check_data,
+        &overlap_check_heap_buf,
+        &num_match_nodes,
+        &max_match_length,
+        &match_strings,
+        &fast_section,
+        &fast_sections,
+        &section_repeats,
+        section_scores,
+        &prior_min_score,
+        &fast_min_score,
+        &new_min_score,
+        scan_cycle
+      );
     }
+
+
 
     if (fast_mode == 0) {
       uint32_t prior_max_scores = max_scores;
