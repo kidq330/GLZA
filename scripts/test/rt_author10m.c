@@ -4,8 +4,15 @@
 #include "GLZA.h"
 #include "GLZAcomp.h"
 #include "GLZAdecode.h"
+
 int main(void) {
-  struct param_data p = { 0xA00000, 0, 0, 0, 1, 0, 1, 0, 0, 2, 0, 16000.0, 0.6, 4.0 };
+  /* Full author bench preset; set GLZA_RAM_MB=16000 on machines with enough RAM. */
+  struct param_data p = { 0xA00000, 0, 0, 0, 1, 0, 0, 1, 0, 2, 0, 0.0, 0.6, 4.0 };
+  const char *ram_mb = getenv("GLZA_RAM_MB");
+  if (ram_mb != NULL && ram_mb[0] != '\0') {
+    p.user_set_RAM_size = 1;
+    p.RAM_usage = strtod(ram_mb, NULL);
+  }
   FILE *f = fopen("../enwik10m", "rb");
   fseek(f, 0, SEEK_END);
   size_t n = ftell(f);

@@ -47,17 +47,30 @@ const uint32_t MAX_SCORES_FAST = 0x7FFF;
 const uint32_t NODE_DATA_STACK_DEPTH = MAX_MATCH_LENGTH + 32;
 const float BIG_FLOAT = 1000000000.0;
 
-uint32_t num_file_symbols, num_terminals;
-uint32_t *start_symbol_ptr, *end_symbol_ptr, *symbol_counts, *next_match_ptr[8], num_starts[0x100], num_ends[0x100], o1c[0x100][0x100];
-int32_t *base_nodes_child_node_num;
-int16_t *score_map;
-uint8_t cap_encoded, fast_mode;
-atomic_uint_least16_t rank_scores_write_index, rank_scores_read_index;
-atomic_uint_least32_t substitute_data_write_index, substitute_data_read_index;
-atomic_uintptr_t max_symbol_ptr, scan_symbol_ptr;
-double log_file_symbols, num_file_symbols_p1_x_log_file_symbols_p1, new_rule_cost, *x_log2_x;
-double order_ratio, log2_x[0x4000], nfs_profit[0x400];
-float min_score;
+uint32_t num_file_symbols; /* grammar stream length in uint32_t symbols (includes rule markers) */
+uint32_t num_terminals;    /* alphabet size: UTF-8 code points or 0x100 raw bytes */
+uint32_t *start_symbol_ptr; /* base of in-RAM grammar stream; also bump-allocator arena base */
+uint32_t *end_symbol_ptr;   /* one-past-last live symbol; sentinel 0xFFFFFFFE written at *end_symbol_ptr */
+uint32_t *symbol_counts;    /* malloc'd [next_new_symbol_number]; size tied to max_rules allocation */
+uint32_t *next_match_ptr[8]; /* per overlap-check thread: cursor into that thread's match-pair slice */
+uint32_t num_starts[0x100];  /* order-1: count of symbols starting with each UTF-8 context byte */
+uint32_t num_ends[0x100];    /* order-1: count of symbols ending with each context byte */
+uint32_t o1c[0x100][0x100];  /* order-1 co-occurrence counts [end_context][start_context] */
+int32_t *base_nodes_child_node_num; /* suffix-tree child index table; rows sized child_ptr_array_size * BASE_NODES_CHILD_ARRAY_SIZE */
+int16_t *score_map;          /* fast_mode==1 only: maps file offsets to candidate ranks (2*in_size bytes) */
+uint8_t cap_encoded;         /* input used capitalization transform (format byte) */
+uint8_t fast_mode;           /* 0=slow/exhaustive scoring path; 1=fast sectioned path (TurboBench default) */
+atomic_uint_least16_t rank_scores_write_index, rank_scores_read_index; /* producer/consumer for rank_scores_buffer */
+atomic_uint_least32_t substitute_data_write_index, substitute_data_read_index; /* word-substitution command queue */
+atomic_uintptr_t max_symbol_ptr, scan_symbol_ptr; /* fast_mode==0 parallel tree build: furthest scanned symbol address */
+double log_file_symbols;     /* log2(num_file_symbols); refreshed each main_loop pass */
+double num_file_symbols_p1_x_log_file_symbols_p1; /* fast_mode==0 && scan_mode!=0: x*log2(x) helper for nfs_profit[] */
+double new_rule_cost;        /* fast_mode==0 && scan_mode!=0: entropy cost of adding one more production */
+double *x_log2_x;            /* fast_mode==0 only: malloc(8*max_x_log2_x); max_x_log2_x tracks logical length */
+double order_ratio;          /* from params->order; used in fast_mode==0 entropy/profit scoring */
+double log2_x[0x4000];       /* precalc log2(i) for i in [1, NUM_PRECALCULATED_LOG2_X); tight bound on index */
+double nfs_profit[0x400];  /* fast_mode==0 && scan_mode!=0: precalc NFS marginal profit; index < NUM_PRECALCULATED_NFSMR_LOGS */
+float min_score;             /* current candidate score threshold; adaptive each pass (paths differ by fast_mode) */
 
 struct node {
   uint32_t symbol;
@@ -103,13 +116,13 @@ struct node_score_data {
 };
 
 struct rank_scores_thread_data {
-  uint16_t *candidates_index;
-  uint16_t max_scores;
-  uint16_t num_candidates;
-  uint32_t num_file_symbols;
-  struct node_score_data rank_scores_buffer[0x10000];
-  struct node_score_data candidates[0x8000];
-  uint16_t *candidates_position;
+  uint16_t *candidates_index; /* heap: permutation sorting candidates[] by score; size max_scores */
+  uint16_t max_scores;        /* capacity this pass; mirrors outer max_scores (MAX_SCORES or MAX_SCORES_FAST) */
+  uint16_t num_candidates;  /* active entries in candidates[] after ranking */
+  uint32_t num_file_symbols;  /* snapshot for rank_scores_thread_fast only */
+  struct node_score_data rank_scores_buffer[0x10000]; /* SPSC queue to rank thread; index capped by max_scores in practice */
+  struct node_score_data candidates[0x8000]; /* scored substring candidates; logical size num_candidates <= max_scores */
+  uint16_t *candidates_position; /* fast_mode==1 only: inverse map for partial sort */
 };
 
 struct substitute_thread_data {
@@ -135,34 +148,34 @@ struct overlap_check {
   uint32_t *stop_symbol_ptr;
   uint32_t **next_match_ptr_ptr;
   uint32_t *match_stop_ptr;
-  uint32_t num_overlaps;
+  uint32_t num_overlaps;     /* next free slot in second[]/next[]; fast_mode==1 overlap-list path only */
   uint8_t *candidate_bad;
   struct match_node *match_nodes;
-  uint32_t second[150000];
-  int32_t next[150000];
+  uint32_t second[150000];   /* heuristic cap (not num_candidates); OOB guarded by num_overlaps < 150000 check */
+  int32_t next[150000];      /* parallel adjacency for overlap pairs; same heuristic bound as second[] */
 };
 
 struct find_substitutions_thread_data {
   uint32_t *start_symbol_ptr;
   uint32_t *stop_symbol_ptr;
-  uint32_t extra_match_symbols;
-  uint32_t data[0x800000];
+  uint32_t extra_match_symbols; /* trailing symbols past stop_symbol_ptr still part of last match */
+  uint32_t data[0x800000];      /* ring buffer of substitution ops; indices masked with 0x7FFFFF; size is heuristic */
   struct match_node *match_nodes;
   atomic_uchar done;
-  atomic_uint_least32_t write_index;
-  atomic_uint_least32_t read_index;
+  atomic_uint_least32_t write_index; /* producer index into data[] */
+  atomic_uint_least32_t read_index;  /* consumer index into data[] */
 };
 
 struct symbol_ends_data {
   uint8_t start;
   uint8_t end;
-} *symbol_ends;
+} *symbol_ends; /* malloc(max_rules): UTF-8 context byte at start/end of each symbol (rule RHS metadata) */
 
-struct node * nodes;
-uint32_t nodes_num_limit;
-uint32_t child_ptr_array_size;
-struct node_score_data * candidates;
-struct match_node ** child_ptr_array;
+struct node * nodes;              /* suffix-tree node array; allocated in-RAM after base_nodes_child_node_num */
+uint32_t nodes_num_limit;         /* max struct node slots from remaining RAM (nodes_num_limit = room / sizeof(node)) */
+uint32_t child_ptr_array_size;    /* equals next_new_symbol_number; sizes child_ptr_array[] and base_nodes rows */
+struct node_score_data * candidates; /* alias of rank_scores_data_ptr->candidates[0] for legacy code */
+struct match_node ** child_ptr_array; /* per-first-symbol roots into match_nodes prefix tree; size child_ptr_array_size */
 pthread_mutex_t suffix_tree_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 uint8_t get_UTF8_context(uint32_t symbol) {
@@ -2662,11 +2675,16 @@ void main_loop_init(
   double d_num_file_symbols = (double)num_file_symbols;
   log_file_symbols = log2(d_num_file_symbols);
   uint8_t* free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
+  /* Both pointers start at the same address: double[num_symbols] then float[num_symbols] when scan_mode==0 && fast_mode==0.
+   * fast_mode==0 uses symbol_entropy (double) for score_symbol_tree; fast_mode==1 uses symbol_entropy_f only.
+   * After init, free_RAM_ptr advances past the float table — do not treat these as long-lived aliases. */
   double* symbol_entropy = (double *)free_RAM_ptr;
   float* symbol_entropy_f = (float *)free_RAM_ptr;
 
+  /* scan_mode==0 (word pass): reserve one float table; scan_mode!=0 && fast_mode==0: reserve two. */
   free_RAM_ptr += (1 + ((scan_mode != 0) & (fast_mode == 0))) * sizeof(float) * (size_t)next_new_symbol_number;
   if ((scan_mode != 0) && (fast_mode == 0)) {
+    /* slow path once past word pass (scan_mode>=1): NFS profit tables */
     num_file_symbols_p1_x_log_file_symbols_p1 = xlogx(num_file_symbols + 1);
     for (size_t i = 1; i < NUM_PRECALCULATED_NFSMR_LOGS; i++) {
       double tmp = num_file_symbols - i + 1;
@@ -2675,6 +2693,7 @@ void main_loop_init(
     new_rule_cost = num_file_symbols_p1_x_log_file_symbols_p1 - xlogx(d_num_file_symbols) + 1.0
                   + (num_rules == 0 ? 0 : xlogx(num_rules) - xlogx(num_rules + 1));
   } else {
+    /* scan_mode==0 (word pass) or fast_mode==1: repeat/substitution cost tables for score_symbol_tree_words / _fast */
     float log2_num_symbols_plus_substitution_cost = (float)log_file_symbols + 1.4;
     for (size_t i = 2 ; i < NUM_PRECALCULATED_SYMBOL_COSTS ; i++) {
       new_symbol_cost[i] = log2_num_symbols_plus_substitution_cost - (float)log2_x[i - 1]; // -1 for repeats only
@@ -2701,6 +2720,7 @@ void main_loop_init(
       } while (++i < next_new_symbol_number);
     }
     if (scan_mode == 0) {
+      /* word pass only: mirror double entropies into symbol_entropy_f for score_symbol_tree_words */
       size_t i = 0;
       do {
         if (symbol_counts[i] != 0) {
@@ -2792,7 +2812,7 @@ uint8_t scan_mode0(
 
   uint32_t next_node_num = 1;
   uint32_t* in_symbol_ptr = start_symbol_ptr;
-  uint8_t word_start[0x80];
+  uint8_t word_start[0x80]; /* ASCII-ish set marking symbols that may start a word after space (0x20) */
   for (size_t i = 0 ; i < 0x80 ; i++)
     word_start[i] = 0;
   for (size_t i = 'a' ; i <= 'z' ; i++)
@@ -2885,7 +2905,7 @@ uint8_t scan_mode0(
     }
     uint8_t* free_RAM_ptr = (uint8_t*)substitute_base;
     uint32_t* substitute_data = (uint32_t *)free_RAM_ptr;
-    free_RAM_ptr += 0x40000 * sizeof(uint32_t);
+    free_RAM_ptr += 0x40000 * sizeof(uint32_t); /* substitute_data_limit=0x40000 elsewhere; fixed heuristic size */
     struct substitute_thread_data substitute_thread_data = *ptr_substitute_thread_data;
     substitute_thread_data.symbol_counts = symbol_counts;
     substitute_thread_data.substitute_data = substitute_data;
@@ -2900,7 +2920,7 @@ uint8_t scan_mode0(
       match_region_end_limit = (uintptr_t)nodes;
 
     uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
-        / sizeof(struct match_node));
+        / sizeof(struct match_node)); /* derived bound; num_match_nodes checked against this */
     uint32_t num_match_nodes = 1;
     uint32_t max_match_length = 0;
     {
@@ -3311,7 +3331,8 @@ wmain_symbol_substitution_loop_end2:
 
 void main_loop(
   uint32_t* p_num_rules,
-  uint8_t scan_mode,
+  uint8_t scan_mode, /* phase state: 0=word pass, 1=run dedup, 2=general scan, 3=retry w/ lower min_score;
+                      * initial value from GLZAcompress is 0/1 gate (skip word pass when non-zero) */
   uint32_t num_terminals_used,
   uint8_t *end_RAM_ptr,
   uint32_t** p_in_symbol_ptr,
@@ -3338,54 +3359,54 @@ void main_loop(
   uint8_t section_repeats,
   uint16_t* p_scan_cycle
 ) {
-  uint32_t symbol;
-  uint32_t node_score_number;
-  uint32_t num_prior_matches;
-  uint32_t num_match_nodes;
-  uint32_t suffix_node_number;
-  uint32_t next_node_num;
-  uint32_t max_match_length;
-  uint32_t best_score_num_symbols;
-  uint32_t num_overlaps;
-  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
-  uint32_t new_rule_number[0x8000];
-  uint32_t *previous_in_symbol_ptr;
-  uint32_t *out_symbol_ptr;
-  uint32_t *stop_symbol_ptr;
-  uint32_t *search_match_ptr;
-  uint32_t *start_cycle_symbol_ptr;
-  uint32_t *end_cycle_symbol_ptr;
-  uint32_t *node_string_start_ptr;
-  uint32_t *block_ptr;
-  uint32_t *match_string_start_ptr;
-  uint32_t *match_strings;
-  uint32_t *substitute_data;
-  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
-  uint32_t *stop_matches_symbol_ptr[8];
-  int32_t* base_node_child_num_ptr;
-  uint16_t num_candidates;
-  uint16_t node_ptrs_num;
-  float new_min_score;
-  float log2_num_symbols_plus_substitution_cost;
-  float production_cost;
-  size_t block_size;
-  double order_0_entropy;
-  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS];
-  struct tree_thread_data tree_thread_data[13];
+  uint32_t symbol;              /* current symbol while scanning/building trees */
+  uint32_t node_score_number;   /* candidate index from match_node->score_number during overlap pass */
+  uint32_t num_prior_matches;   /* active entries in prior_match_* arrays (max MAX_PRIOR_MATCHES) */
+  uint32_t num_match_nodes;     /* allocated prefix-tree nodes this sub-pass; checked vs match_nodes_limit */
+  uint32_t suffix_node_number;  /* index into match_nodes[] while wiring miss/hit links */
+  uint32_t next_node_num;       /* next free suffix-tree node slot; checked vs main_nodes_limit / node_num_limit */
+  uint32_t max_match_length;    /* longest candidate string this pass; sizes match_strings[num_candidates * max_match_length] */
+  uint32_t best_score_num_symbols; /* symbol count while rebuilding prefix tree (starts at 2) */
+  uint32_t num_overlaps;        /* slots used in overlap_check_data[0].second[]; fast_mode==1 only */
+  uint32_t prior_match_score_number[MAX_PRIOR_MATCHES]; /* overlapping-match stack; size num_prior_matches */
+  uint32_t new_rule_number[0x8000]; /* maps candidate index -> new symbol id; heuristic cap 0x8000, logical size num_candidates */
+  uint32_t *previous_in_symbol_ptr; /* word-substitution loop: start of current output run */
+  uint32_t *out_symbol_ptr;         /* compaction write cursor during substitution */
+  uint32_t *stop_symbol_ptr;        /* end of scan slice for overlap/substitution (may be < end_symbol_ptr) */
+  uint32_t *search_match_ptr;       /* cursor while walking a candidate through prefix tree for overlap detect */
+  uint32_t *start_cycle_symbol_ptr; /* start of this compression cycle slice in grammar stream */
+  uint32_t *node_string_start_ptr;  /* start of matched substring in grammar stream */
+  uint32_t *block_ptr;              /* stride pointer while partitioning overlap-check blocks */
+  uint32_t *match_string_start_ptr; /* row in match_strings[] for one candidate */
+  uint32_t *match_strings;        /* saved RHS copies; array size num_candidates * max_match_length (heap layout) */
+  uint32_t *substitute_data;      /* word-pass command buffer; capacity substitute_data_limit (0x40000) */
+  uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES]; /* end positions paired with prior_match_score_number[] */
+  uint32_t *stop_matches_symbol_ptr[8]; /* per-thread: don't record matches at/after this pointer */
+  int32_t* base_node_child_num_ptr; /* cursor into base_nodes_child_node_num during word-tree init */
+  uint16_t num_candidates;        /* candidates accepted this pass (<= max_scores, <= max_rules headroom) */
+  uint16_t node_ptrs_num;         /* rank_scores_buffer fill level / sync counter for rank thread */
+  float new_min_score;            /* scratch while adapting min_score (scan_mode==3 retry path) */
+  float log2_num_symbols_plus_substitution_cost; /* log2(n)+1.4; set in main_loop_init when scan_mode==0 or fast_mode==1;
+                                                  * passed to score_symbol_tree_words (word pass) and score_symbol_tree_fast */
+  float production_cost;          /* per-production overhead; same init branch as log2_num_symbols_plus_substitution_cost */
+  size_t block_size;              /* num_file_symbols >> 3; overlap-check thread block stride */
+  double order_0_entropy;         /* fast_mode==0 min_score input for scan_mode0(); BUG: never assigned before that call */
+  float new_symbol_cost[NUM_PRECALCULATED_SYMBOL_COSTS]; /* repeat-cost table; filled when scan_mode==0 or fast_mode==1 */
+  struct tree_thread_data tree_thread_data[13]; /* parallel suffix-tree builders; 12 threads if fast_mode==0 else 13 */
 
-  size_t substitute_heap_size = 0;
+  size_t substitute_heap_size = 0; /* bytes allocated for substitute_heap_buf; only when num_file_symbols >= 1M */
   
-  uint8_t *substitute_heap_buf = NULL;
-  struct find_substitutions_thread_data *find_substitutions_thread_data_buf = NULL;
-  struct find_substitutions_thread_data *find_substitutions_thread_data = NULL;
-  struct overlap_check *overlap_check_heap_buf = NULL;
-  struct substitute_thread_data substitute_thread_data;
-  struct overlap_check *overlap_check_data;
-  struct match_node *match_node_ptr;
+  uint8_t *substitute_heap_buf = NULL; /* optional 0x800000/0x1000000 heap when grammar >= 1M symbols */
+  struct find_substitutions_thread_data *find_substitutions_thread_data_buf = NULL; /* lazy alloc; num_file_symbols >= 100M only */
+  struct find_substitutions_thread_data *find_substitutions_thread_data = NULL; /* active thread array (stack or buf) */
+  struct overlap_check *overlap_check_heap_buf = NULL; /* malloc fallback when in-RAM overlap_check[] won't fit */
+  struct substitute_thread_data substitute_thread_data; /* threaded word substitution in/out pointers */
+  struct overlap_check *overlap_check_data; /* 8 structs inline or overlap_check_heap_buf; second/next sized heuristically */
+  struct match_node *match_node_ptr; /* cursor in prefix tree during overlap/substitution walks */
 
-  pthread_t build_tree_threads[7];
-  pthread_t overlap_check_threads[7];
-  pthread_t rank_scores_thread1;
+  pthread_t build_tree_threads[7];       /* fast_mode==0: 6 workers; fast_mode==1: 7 workers */
+  pthread_t overlap_check_threads[7];    /* threads 1..7 of overlap_check_data[] */
+  pthread_t rank_scores_thread1;         /* rank_scores_thread (slow) or rank_scores_thread_fast */
 
   uint32_t* in_symbol_ptr = *p_in_symbol_ptr;
   uint32_t num_rules = *p_num_rules;
@@ -3393,12 +3414,12 @@ void main_loop(
 
   do {
 top_main_loop:
-    uint32_t next_new_symbol_number;
-    double d_num_file_symbols;
-    uint8_t* free_RAM_ptr;
-    double* symbol_entropy;
-    float* symbol_entropy_f;
-    uint32_t node_num_limit;
+    uint32_t next_new_symbol_number; /* num_terminals + num_rules; sizes entropy tables and child_ptr_array this pass */
+    double d_num_file_symbols;       /* (double)num_file_symbols for scoring ratios */
+    uint8_t* free_RAM_ptr;           /* bump pointer into start_symbol_ptr arena after entropy + tree metadata */
+    double* symbol_entropy;          /* fast_mode==0 scoring; aliases start of in-RAM block (see main_loop_init) */
+    float* symbol_entropy_f;         /* fast_mode==1 (+ word pass) per-symbol -log2(p); may share base with symbol_entropy */
+    uint32_t node_num_limit;         /* max suffix-tree nodes (= remaining RAM / sizeof(struct node)) */
 
     main_loop_init(
       &next_new_symbol_number,
@@ -3465,7 +3486,7 @@ top_main_loop:
     if (scan_mode == 1) {
       scan_mode = 2;
       max_scores = initial_max_scores;
-      uint32_t max_run_length[0x100];
+      uint32_t max_run_length[0x100]; /* longest equal-symbol run per terminal; scan_mode==1 dedup pass only */
       uint32_t run_length = 0;
       uint32_t prior_symbol = 0xFFFFFFFE;
       memset(max_run_length, 0, 0x400);
@@ -3565,13 +3586,14 @@ top_main_loop:
     in_symbol_ptr = start_cycle_symbol_ptr;
 
     // setup to build the suffix tree
-    uint32_t main_max_symbol;
-    uint32_t main_nodes_limit;
+    uint32_t main_max_symbol;   /* highest symbol id handled by main (non-worker) suffix-tree builder this pass */
+    uint32_t main_nodes_limit;  /* node budget for main thread; fast_mode==0: 18% of nodes; fast_mode==1: 6% */
     size_t i = 1;
     uint32_t nodes_div_100 = node_num_limit / 100;
     uint32_t symbols_div_100 = (num_file_symbols - num_rules) / 100;
+    uint32_t *end_cycle_symbol_ptr;   /* fast_mode==1 only: end of current fast_section slice */
     next_node_num = 1;
-    if (fast_mode == 0) {
+      if (fast_mode == 0) {
       // NOLINTBEGIN(readability-magic-numbers)
       uint8_t thread_symbol_limit[] = {
             5, 11, 17, 24, 32, 42, 52, 61, 69, 77, 86, 93
@@ -3675,7 +3697,7 @@ top_main_loop:
           start_cycle_symbol_ptr
       );
 
-      end_cycle_symbol_ptr = fast_section == fast_sections - 1
+      end_cycle_symbol_ptr = fast_section == fast_sections - 1 /* fast_mode==1 only */
                            ? end_symbol_ptr
                            : start_symbol_ptr + (uint32_t)((float)num_file_symbols * (float)(fast_section + 1) / (float)fast_sections);
 
@@ -4696,6 +4718,7 @@ main_overlap_check_loop_end:
   } while ((num_candidates != 0) && (num_terminals + num_rules < max_rules));
 
   // __jm__ mutate results
+  // __jm__ mutate results
   *p_scan_cycle = scan_cycle;
   *p_num_rules = num_rules;
   *p_in_symbol_ptr = in_symbol_ptr;
@@ -4724,10 +4747,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
 
   uint64_t max_memory_usage = sizeof(uint32_t *) >= 8 ? 0x800000000 : 0x70000000;
 
-  // uint8_t fast_mode; // (global)
-  // double order_ratio; // (global)
-  double profit_ratio_power;
-  uint8_t create_words; // __jm__ bool?
+  // uint8_t fast_mode; — file-global; set below from params (forced 0 when in_size < 1000)
+  // double order_ratio; — file-global; from params->order
+  double profit_ratio_power; /* exponent on profit ratio; default 1.0 (fast) or 2.0 (slow) unless user-set */
+  uint8_t create_words;      /* if 0, word pass skipped (initial scan_mode gate set non-zero) */
   {
     if (params != 0) {
       if (params->user_set_profit_ratio_power != 0)
@@ -4742,7 +4765,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     }
   }
 
-  uint32_t max_rules;
+  uint32_t max_rules; /* upper bound on num_terminals + num_rules; clamped by in_size and params->max_rules */
   {
     // max_rules = min(0xA00000, (in_size >> 4) + 0x110000);
     max_rules = 0xA00000;
@@ -4761,13 +4784,13 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     return 0;
   }
 
-  uint32_t max_scores = fast_mode == 1 ? MAX_SCORES_FAST : MAX_SCORES;
+  uint32_t max_scores = fast_mode == 1 ? MAX_SCORES_FAST : MAX_SCORES; /* per-pass candidate cap; grows adaptively in main_loop */
   candidates = &rank_scores_data_ptr->candidates[0];
   memset(num_starts, 0, 0x400);
   memset(num_ends, 0, 0x400);
   memset(o1c, 0, 0x40000);
 
-  uint64_t available_RAM;
+  uint64_t available_RAM; /* bytes malloc'd for start_symbol_ptr arena; user-set or heuristic from in_size */
   if (params != 0 && params->user_set_RAM_size != 0) {
     available_RAM = (uint64_t)(params->RAM_usage * (float)0x100000);
     if (available_RAM > max_memory_usage)
@@ -4799,16 +4822,16 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
       return 0;
     }
   }
-  uint8_t* end_RAM_ptr = (uint8_t *)start_symbol_ptr + available_RAM;
+  uint8_t* end_RAM_ptr = (uint8_t *)start_symbol_ptr + available_RAM; /* one-past-end of grammar arena */
 
   // parse the file to determine UTF8_compliant
-  uint32_t *in_symbol_ptr = start_symbol_ptr;
-  uint32_t num_rules = 0;
-  uint8_t UTF8_compliant = 0;
-  uint8_t format = **iobuf; // __jm__ not bool, actual byte
+  uint32_t *in_symbol_ptr = start_symbol_ptr; /* read/write cursor during ingest; later reused in main_loop */
+  uint32_t num_rules = 0;                     /* production rules generated so far */
+  uint8_t UTF8_compliant = 0;                 /* set if entire input decoded as valid UTF-8 */
+  uint8_t format = **iobuf;                   /* GLZA format tag byte (not a boolean) */
   cap_encoded = (format == 1);
-  uint32_t max_UTF8_value = 0x7F;
-  uint8_t *in_char_ptr = *iobuf + 1;
+  uint32_t max_UTF8_value = 0x7F;               /* high water mark while parsing UTF-8 terminals */
+  uint8_t *in_char_ptr = *iobuf + 1;            /* raw input cursor during parse/serialize */
   uint8_t *end_char_ptr = *iobuf + in_size;
 
   uint32_t UTF8_value;
@@ -4840,8 +4863,8 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
 #ifdef PRINTON
   fprintf(stderr, "cap encoded: %u, UTF8 compliant %u\n", (unsigned int)cap_encoded, (unsigned int)UTF8_compliant);
 #endif
-
-  uint8_t max_terminal;
+  // create the initial grammar and count symbols
+  uint8_t max_terminal; /* 0x7F if UTF-8 path else 0xFF; bounds run-length dedup and tree symbol tests */
   // create the initial grammar and count symbols
   in_char_ptr = *iobuf + 1;
   if (UTF8_compliant != 0) {
@@ -4909,7 +4932,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     num_starts[sym2]++;
   }
 
-  uint32_t max_x_log2_x = 0;
+  uint32_t max_x_log2_x = 0; /* tracks x_log2_x[] allocation length; derived from num_ends[], capped at NUM_PRECALCULATED_X_LOG2_X */
   for (size_t i = 0 ; i < 0x100 ; i++)
     if (num_ends[i] > max_x_log2_x)
       max_x_log2_x = num_ends[i];
@@ -4917,7 +4940,7 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   if (max_x_log2_x > NUM_PRECALCULATED_X_LOG2_X)
     max_x_log2_x = NUM_PRECALCULATED_X_LOG2_X;
 
-  uint32_t first_define_index = in_symbol_ptr - start_symbol_ptr;
+  uint32_t first_define_index = in_symbol_ptr - start_symbol_ptr; /* stream index of first 0x80000001 rule marker */
   *end_symbol_ptr = 0xFFFFFFFE;
   size_t min_RAM = end_symbol_ptr - start_symbol_ptr + 2 * MAX_MATCH_LENGTH * sizeof(struct node);
   if (min_RAM > available_RAM) {
@@ -4926,10 +4949,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     return 0;
   }
 
-  uint32_t *new_symbol_number;
-  struct score_data *node_data;
-  uint16_t *candidates_index;
-  uint8_t *candidate_bad;
+  uint32_t *new_symbol_number;  /* run-length dedup: terminal -> new repeat symbol; malloc(4*max_scores) */
+  struct score_data *node_data;   /* stack for tree scoring walk; NODE_DATA_STACK_DEPTH entries */
+  uint16_t *candidates_index;   /* permutation [0..max_scores); malloc(2*max_scores) */
+  uint8_t *candidate_bad;         /* 0=ok, 1=reject, 2=done; malloc(max_scores) */
   if ((0 == (new_symbol_number = (uint32_t *)malloc(4 * max_scores)))
       || (0 == (node_data = (struct score_data *)malloc(NODE_DATA_STACK_DEPTH * sizeof(struct score_data))))
       || (0 == (candidates_index = (uint16_t *)malloc(2 * max_scores)))
@@ -4947,13 +4970,13 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     log2_x[i] = log2((double)i);
   rank_scores_data_ptr->candidates_index = candidates_index;
 
-  uint32_t initial_max_scores;
-  uint8_t fast_sections;
-  uint8_t fast_section;
-  float fast_min_score;
-  uint16_t *candidates_position;
-  uint8_t section_repeats; // __jm__ only initialized when fast_mode?
-  float section_scores[23];
+  uint32_t initial_max_scores;  /* starting max_scores passed to main_loop; formula differs by fast_mode */
+  uint8_t fast_sections;        /* 1 if fast_mode==0; else 23 then adaptive down to 1 (fast_mode==1 only) */
+  uint8_t fast_section;         /* fast_mode==1 only: which file slice [0..fast_sections) is built this pass */
+  float fast_min_score;         /* fast_mode==1 only: floor when shrinking sections on weak scores */
+  uint16_t *candidates_position; /* fast_mode==1 only: malloc(2*max_scores); __jm__ only initialized when fast_mode==1 */
+  uint8_t section_repeats;      /* fast_mode==1 only: stick with prior section up to 2 passes; __jm__ only initialized when fast_mode==1 */
+  float section_scores[23];     /* fast_mode==1 only: best tail score seen per section; size matches initial fast_sections */
   if (fast_mode == 0) {
     for (size_t i = 1 ; i < max_x_log2_x ; i++)
       x_log2_x[i] = (double)i * log2((double)i);
@@ -4975,10 +4998,12 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
   memset(candidate_bad, 0, max_scores);
   min_score = 10.0;
-  uint16_t scan_cycle = 0;
+  uint16_t scan_cycle = 0; /* compression pass counter; surfaced in PRINTON and output validation */
 
   main_loop(
     &num_rules,
+    /* initial scan_mode gate (0=run word pass first, non-zero=skip to dedup/general scan):
+     *   ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0) */
     ((cap_encoded == 0) && ((UTF8_compliant == 0) || (fast_mode == 0))) || (create_words == 0),
     num_terminals_used,
     end_RAM_ptr,

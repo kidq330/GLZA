@@ -13,6 +13,7 @@
 #   GLZA_CLANG   compiler (default /usr/bin/clang)
 #   GLZA_CORPUS  input file (default ../enwik10m)
 #   GLZA_TMP     temp dir for blobs (default /tmp)
+#   GLZA_RAM_MB  optional fixed RAM for rt_author (default: heuristic, not 16GB)
 
 set -euo pipefail
 
@@ -78,8 +79,10 @@ build_harnesses() {
   link_harness dec_only_mr dec_only_mr.c
   link_harness rt_same6500 rt_same6500.c
   link_harness rt_fast0 rt_fast0.c
+  link_harness rt_slow rt_slow.c
+  link_harness rt_author rt_author.c
   link_harness rt_author10m rt_author10m.c
-  log "Built: rt_large rt_test rt_save dec_only_mr dec_only6500 rt_same6500"
+  log "Built: rt_large rt_test rt_save dec_only_mr dec_only6500 rt_same6500 rt_slow rt_author"
 }
 
 # run_case name cmd expected_rc
@@ -147,6 +150,14 @@ run_case "max_rules=6325 10m" "./rt_large 6325 enwik10m" 0
 run_case "max_rules=6330 1m" "./rt_large 6330 enwik1m" 0
 run_case "max_rules=6330 10m (known bad)" "./rt_large 6330 enwik10m" fail
 
+log "fast_mode=0 roundtrip on enwik1m (rt_slow)"
+run_case "slow max_rules=500 1m" "./rt_slow 500 enwik1m" 0
+run_case "slow max_rules=5000 1m" "./rt_slow 5000 enwik1m" 0
+run_case "slow max_rules=6325 1m" "./rt_slow 6325 enwik1m" 0
+
+log "Author-like fast_mode=0 on enwik1m (rt_author; default RAM heuristic, not 16GB)"
+run_case "author-like 1m" "./rt_author enwik1m" 0
+
 if [[ $MODE_FULL -eq 1 ]]; then
   log "Running 100m and other full test"
 
@@ -198,8 +209,10 @@ fi
 # fi
 
 if [[ $MODE_FULL -eq 1 ]] && [[ -x ./rt_fast0 ]]; then
- log "Author-like fast_mode=0 (slow)"
- run_case "fast_mode=0 full max_rules" "./rt_fast0" fail
+  log "fast_mode=0 on enwik10m (slow; known grammar/decode bugs — see DEBUG_PLAN.md)"
+  run_case "fast_mode=0 full max_rules 10m" "./rt_fast0" fail
+  run_case "slow max_rules=500 10m (size mismatch)" "./rt_slow 500 enwik10m" fail
+  run_case "slow max_rules=5000 10m (decode fail)" "./rt_slow 5000 enwik10m" fail
 fi
  
 if [[ $MODE_FULL -eq 1 ]] && [[ -x ./rt_same6500 ]]; then
