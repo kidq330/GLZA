@@ -185,6 +185,10 @@ static struct node_score_data * candidates; /* alias of rank_scores_data_ptr->ca
 static struct match_node ** child_ptr_array; /* per-first-symbol roots into match_nodes prefix tree; size child_ptr_array_size */
 static pthread_mutex_t suffix_tree_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static double xlogx(double arg) {
+  return arg * log2(arg);
+}
+
 static uint8_t get_UTF8_context(uint32_t symbol) {
   if (symbol < 0x80) {
     return((uint8_t)symbol);
@@ -1279,8 +1283,9 @@ static void *rank_word_scores_thread(void *arg) {
     while ((local_write_index == node_ptrs_num)
         && ((local_write_index = atomic_load_explicit(&rank_scores_write_index, memory_order_acquire))
           == node_ptrs_num)); // wait
-    if (rank_scores_buffer[node_ptrs_num].last_match_index == 0)
+    if (rank_scores_buffer[node_ptrs_num].last_match_index == 0) {
       break;
+    }
     float score = rank_scores_buffer[node_ptrs_num].score;
     if (score > min_score) {
       // find the position in the score list this node would go in
@@ -1290,10 +1295,12 @@ static void *rank_word_scores_thread(void *arg) {
       candidate_search_size = num_candidates + 1;
       do {
         candidate_search_size = (candidate_search_size + 1) >> 1;
-        if (candidate_search_size > new_score_rank)
+        if (candidate_search_size > new_score_rank) {
           candidate_search_size = new_score_rank;
-        if (score > candidates[candidates_index[new_score_rank - candidate_search_size]].score)
+        }
+        if (score > candidates[candidates_index[new_score_rank - candidate_search_size]].score) {
           new_score_rank -= candidate_search_size;
+        }
       } while (candidate_search_size > 1);
 
       if (num_candidates != max_scores) { // increment the list length if not at limit
@@ -1307,8 +1314,9 @@ static void *rank_word_scores_thread(void *arg) {
       candidates[score_index].score = score;
       candidates[score_index].num_symbols = rank_scores_buffer[node_ptrs_num].num_symbols;
       candidates[score_index].last_match_index = rank_scores_buffer[node_ptrs_num].last_match_index;
-      if (num_candidates == max_scores)
+      if (num_candidates == max_scores) {
         min_score = candidates[candidates_index[max_scores - 1]].score;
+      }
     }
     atomic_store_explicit(&rank_scores_read_index, ++node_ptrs_num, memory_order_relaxed);
   }
@@ -1333,12 +1341,12 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
   double string_entropy = symbol_entropy[prior_symbol];
   double first_symbol_entropy = string_entropy;
 
-  if (symbol_counts[prior_symbol] < NUM_PRECALCULATED_X_LOG2_X)
-    string_profit = -x_log2_x[symbol_counts[prior_symbol]] - new_rule_cost;
-  else
-    string_profit = (-(double)symbol_counts[prior_symbol] * log2((double)symbol_counts[prior_symbol])) - new_rule_cost;
-  if ((node_ptr->instances == symbol_counts[prior_symbol]) &&  (prior_symbol >= num_terminals))
+  string_profit = symbol_counts[prior_symbol] < NUM_PRECALCULATED_X_LOG2_X
+                ? -x_log2_x[symbol_counts[prior_symbol]] - new_rule_cost
+                : xlogx(symbol_counts[prior_symbol]) - new_rule_cost;
+  if ((node_ptr->instances == symbol_counts[prior_symbol]) &&  (prior_symbol >= num_terminals)) {
     string_profit += new_rule_cost;
+  }
 
   while (1) {
     node_instances = node_ptr->instances;
@@ -1352,17 +1360,16 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
       }
       uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       repeats = (double)(node_instances - 1);
-      if (node_instances <= NUM_PRECALCULATED_X_LOG2_X)
-        bits_saved = x_log2_x[node_instances - 1];
-      else
-        bits_saved = repeats * log2(repeats);
+      // __jm__ differing arguments between branches?
+      bits_saved = node_instances <= NUM_PRECALCULATED_X_LOG2_X
+                 ? x_log2_x[node_instances - 1]
+                 : xlogx(repeats);
       uint32_t * symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 1;
       do {
         instances = symbol_counts[*symbol_ptr];
-        if (instances - node_instances + 1 < NUM_PRECALCULATED_X_LOG2_X)
-          bits_saved += x_log2_x[instances - node_instances + 1];
-        else
-          bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
+        bits_saved += instances - node_instances + 1 < NUM_PRECALCULATED_X_LOG2_X
+                    ? x_log2_x[instances - node_instances + 1]
+                    : xlogx(instances - node_instances + 1);
       } while (++symbol_ptr < start_symbol_ptr + node_ptr->last_match_index);
 
       uint32_t * end_symbol_ptr = start_symbol_ptr + node_ptr->last_match_index + num_extra_symbols;
@@ -1375,8 +1382,9 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
           string_profit -= (double)instances * log2((double)instances);
           bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
         }
-        if ((node_instances == instances) && (*symbol_ptr >= num_terminals))
+        if ((node_instances == instances) && (*symbol_ptr >= num_terminals)) {
           string_profit += new_rule_cost;
+        }
         string_entropy += symbol_entropy[*symbol_ptr++];
       }
       bits_saved += (double)((node_instances - 1) * (num_symbols + num_extra_symbols - 1)) * nfs_profit[1];
@@ -1384,10 +1392,10 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
 
       // calculate score
       if (bits_saved > 0.0) {
-        double score = (profit_ratio_power + 1.0) * log2(bits_saved) - profit_ratio_power * log2(repeats * string_entropy);
-        if (order_ratio == 0.0)
+        double score = ((profit_ratio_power + 1.0) * log2(bits_saved)) - (profit_ratio_power * log2(repeats * string_entropy));
+        if (order_ratio == 0.0) {
           score += 40.0;
-        else if ((score > 2.0 * min_score - 98.0) || (score > min_score - 40.5)) {
+        } else if ((score > (2.0 * min_score) - 98.0) || (score > min_score - 40.5)) {
           string_entropy2 = first_symbol_entropy;
           symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 2;
           while (symbol_ptr <= end_symbol_ptr) {
@@ -1397,36 +1405,37 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
                 * (double)symbol_counts[*symbol_ptr]));
             symbol_ptr++;
           }
-          if (node_instances <= NUM_PRECALCULATED_LOG2_X)
-            profit_per_substitution2 = string_entropy2 + log2_x[node_instances - 1] - log_file_symbols;
-          else
-            profit_per_substitution2 = string_entropy2 + log2(repeats) - log_file_symbols;
-          bits_saved2 = repeats * profit_per_substitution2 - new_rule_cost;
+          profit_per_substitution2 = node_instances <= NUM_PRECALCULATED_LOG2_X
+                                   ? string_entropy2 + log2_x[node_instances - 1] - log_file_symbols
+                                   : string_entropy2 + log2(repeats) - log_file_symbols;
+          bits_saved2 = (repeats * profit_per_substitution2) - new_rule_cost;
           if (bits_saved2 > 0.0) {
-            score = score * ((float)1.0 - (float)order_ratio)
+            score = (score * ((float)1.0 - (float)order_ratio))
               + (float)(order_ratio * (log2(bits_saved2) + profit_ratio_power * log2(profit_per_substitution2 / string_entropy2)));
             score += 40.0;
           }
         }
         if (score > min_score) {
           struct node * child_ptr = &nodes[node_ptr->child_node_num];
-          if ((node_ptrs_num & 0xFFF) == 0)
+          if ((node_ptrs_num & 0xFFF) == 0) {
             while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
                 >= 0xF000); // wait
+          }
           rank_scores_buffer[node_ptrs_num].score = score;
           rank_scores_buffer[node_ptrs_num].num_symbols = num_symbols + num_extra_symbols;
           rank_scores_buffer[node_ptrs_num].last_match_index = child_ptr->last_match_index - 1;
           rank_scores_buffer[node_ptrs_num].last_match_index2 = node_ptr->last_match_index + num_extra_symbols;
           if (rank_scores_buffer[node_ptrs_num].last_match_index == rank_scores_buffer[node_ptrs_num].last_match_index2) {
             int32_t * sibling_node_num_ptr = &child_ptr->sibling_node_num[0];
-            if (*sibling_node_num_ptr > 0)
+            if (*sibling_node_num_ptr > 0) {
               rank_scores_buffer[node_ptrs_num].last_match_index = nodes[*sibling_node_num_ptr].last_match_index - 1;
-            else if (*sibling_node_num_ptr != 0)
+            } else if (*sibling_node_num_ptr != 0) {
               rank_scores_buffer[node_ptrs_num].last_match_index = *sibling_node_num_ptr + 0x7FFFFFFF;
-            else if (*(sibling_node_num_ptr + 1) > 0)
+            } else if (*(sibling_node_num_ptr + 1) > 0) {
               rank_scores_buffer[node_ptrs_num].last_match_index = nodes[*(sibling_node_num_ptr + 1)].last_match_index - 1;
-            else if (*(sibling_node_num_ptr + 1) != 0)
+            } else if (*(sibling_node_num_ptr + 1) != 0) {
               rank_scores_buffer[node_ptrs_num].last_match_index = *(sibling_node_num_ptr + 1) + 0x7FFFFFFF;
+            }
           }
           atomic_store_explicit(&rank_scores_write_index, ++node_ptrs_num, memory_order_release);
         }
@@ -1452,9 +1461,9 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
         sib_node_num = node_ptr->sibling_node_num[1];
         tnp = &nodes[sib_node_num];
         if ((sib_node_num > 0)
-            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0)))
+            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
           node_ptr = &nodes[sib_node_num]; // move to sibling 1 - prior symbol unchanged (okay)
-        else {
+        } else {
           if (level == 0) {
             *node_ptrs_num_ptr = node_ptrs_num;
             return;
@@ -1464,11 +1473,13 @@ static void score_base_node_tree(struct node *node_ptr, struct score_data *node_
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0) {
               node_data[level++].next_sibling = 1; // put sibling 1 on stack
+            }
             node_ptr = &nodes[node_ptr->sibling_node_num[0]]; // move to sibling 0
-          } else
+          } else {
             node_ptr = &nodes[node_ptr->sibling_node_num[1]]; // move to sibling 1
+          }
         }
       }
     }
@@ -1500,21 +1511,21 @@ static void score_base_node_tree_fast(struct node *node_ptr, struct score_data *
       }
 
       // calculate score
-      if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
-        profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
-      else
-        profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
+      profit_per_substitution = node_instances < NUM_PRECALCULATED_SYMBOL_COSTS
+                              ? string_entropy - new_symbol_cost[node_instances]
+                              : string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
       if (profit_per_substitution >= 0.0) {
-        bits_saved = repeats * profit_per_substitution - production_cost;
+        bits_saved = (repeats * profit_per_substitution) - production_cost;
         if (bits_saved > min_score) {
           float profit_ratio = profit_per_substitution / string_entropy;
-          float score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio);
+          float score = log2f(bits_saved) + (profit_ratio_power * log2f(profit_ratio));
           score += 2.125;
           if (score > min_score) {
             uint32_t new_score_lmi = node_ptr->last_match_index + num_extra_symbols;
-            if ((node_ptrs_num & 0xFFF) == 0)
+            if ((node_ptrs_num & 0xFFF) == 0) {
               while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
                   >= 0xF000); // wait
+            }
             rank_scores_buffer[node_ptrs_num].score = score;
             rank_scores_buffer[node_ptrs_num].last_match_index = new_score_lmi;
             rank_scores_buffer[node_ptrs_num].num_symbols = num_symbols + num_extra_symbols;
@@ -1547,9 +1558,9 @@ static void score_base_node_tree_fast(struct node *node_ptr, struct score_data *
         sib_node_num = node_ptr->sibling_node_num[1];
         tnp = &nodes[sib_node_num];
         if ((sib_node_num > 0)
-            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0)))
+            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
           node_ptr = &nodes[sib_node_num];
-        else {
+        } else {
           if (level == 0) {
             *node_ptrs_num_ptr = node_ptrs_num;
             return;
@@ -1558,11 +1569,13 @@ static void score_base_node_tree_fast(struct node *node_ptr, struct score_data *
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0) {
               node_data[level++].next_sibling = 1;
+            }
             node_ptr = &nodes[node_ptr->sibling_node_num[0]];
-          } else
+          } else {
             node_ptr = &nodes[node_ptr->sibling_node_num[1]];
+          }
         }
       }
     }
@@ -1586,12 +1599,12 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
   double string_entropy = symbol_entropy[prior_symbol];
   double first_symbol_entropy = string_entropy;
 
-  if (symbol_counts[prior_symbol] < NUM_PRECALCULATED_X_LOG2_X)
-    string_profit = -x_log2_x[symbol_counts[prior_symbol]] - new_rule_cost;
-  else
-    string_profit = -(double)symbol_counts[prior_symbol] * log2((double)symbol_counts[prior_symbol]) - new_rule_cost;
-  if ((node_ptr->instances == symbol_counts[prior_symbol]) && (prior_symbol >= num_terminals))
+  string_profit = symbol_counts[prior_symbol] < NUM_PRECALCULATED_X_LOG2_X
+                ? -x_log2_x[symbol_counts[prior_symbol]] - new_rule_cost
+                : xlogx(symbol_counts[prior_symbol]) - new_rule_cost;
+  if ((node_ptr->instances == symbol_counts[prior_symbol]) && (prior_symbol >= num_terminals)) {
     string_profit += new_rule_cost;
+  }
 
   while (1) {
     node_instances = node_ptr->instances;
@@ -1608,18 +1621,16 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
       }
       uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       repeats = (double)(node_instances - 1);
-      if (node_instances <= NUM_PRECALCULATED_X_LOG2_X)
-        bits_saved = x_log2_x[node_instances - 1];
-      else
-        bits_saved = repeats * log2(repeats);
+      bits_saved = node_instances <= NUM_PRECALCULATED_X_LOG2_X
+                 ? x_log2_x[node_instances - 1]
+                 : xlogx(repeats);
 
       uint32_t * symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 1;
       do {
         instances = symbol_counts[*symbol_ptr];
-        if (instances - node_instances + 1 < NUM_PRECALCULATED_X_LOG2_X)
-          bits_saved += x_log2_x[instances - node_instances + 1];
-        else
-          bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
+        bits_saved += instances - node_instances + 1 < NUM_PRECALCULATED_X_LOG2_X
+                    ? x_log2_x[instances - node_instances + 1]
+                    : xlogx(instances - node_instances + 1);
       } while (++symbol_ptr < start_symbol_ptr + node_ptr->last_match_index);
 
       if (num_extra_symbols == 0) {
@@ -1631,20 +1642,22 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
           string_profit -= (double)instances * log2((double)instances);
           bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
         }
-        if ((node_instances == instances) && (*symbol_ptr >= num_terminals))
+        if ((node_instances == instances) && (*symbol_ptr >= num_terminals)) {
           string_profit += new_rule_cost;
-        if ((num_symbols - 1) * (node_instances - 1) < 0x400)
+        }
+        if ((num_symbols - 1) * (node_instances - 1) < 0x400) {
           bits_saved += nfs_profit[(num_symbols - 1) * (node_instances - 1)];
-        else
+        } else {
           bits_saved += num_file_symbols_p1_x_log_file_symbols_p1
-            - (double)(num_file_symbols + 1 - (num_symbols - 1) * (node_instances - 1))
-            * log2((double)(num_file_symbols + 1 - (num_symbols - 1) * (node_instances - 1)));
+            - ((double)(num_file_symbols + 1 - ((num_symbols - 1) * (node_instances - 1)))
+            * log2((double)(num_file_symbols + 1 - ((num_symbols - 1) * (node_instances - 1)))));
+        }
         bits_saved += string_profit;
         string_entropy += symbol_entropy[*symbol_ptr];
 
         // calculate score
         if (bits_saved > 0.0) {
-          score = (profit_ratio_power + 1.0) * log2(bits_saved) - profit_ratio_power * log2(repeats * string_entropy);
+          score = ((profit_ratio_power + 1.0) * log2(bits_saved)) - (profit_ratio_power * log2(repeats * string_entropy));
           double penalty;
           if (*symbol_ptr == 0x20) {
             if (*(symbol_ptr + 1) != 0x20) {
@@ -1662,9 +1675,10 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
           }
           if (order_ratio == 0.0) {
             score += 40.0;
-            if (score > min_score)
+            if (score > min_score) {
               send_score = 0;
-          } else if ((score > 2.0 * min_score - 98.0) || (score > min_score - 40.5)) {
+            }
+          } else if ((score > (2.0 * min_score) - 98.0) || (score > min_score - 40.5)) {
             string_entropy2 = first_symbol_entropy;
             symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 2;
             do {
@@ -1673,17 +1687,17 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
                 / (((double)o1c[symbol_ends[*(symbol_ptr - 1)].end][symbol_ends[*symbol_ptr].start] - 0.9 * repeats)
                   * (double)symbol_counts[*symbol_ptr]));
             } while (symbol_ptr++ < start_symbol_ptr + node_ptr->last_match_index);
-            if (node_instances <= NUM_PRECALCULATED_LOG2_X)
-              profit_per_substitution2 = string_entropy2 + log2_x[node_instances - 1] - log_file_symbols;
-            else
-              profit_per_substitution2 = string_entropy2 + log2(repeats) - log_file_symbols;
-            bits_saved2 = repeats * profit_per_substitution2 - new_rule_cost;
+            profit_per_substitution2 = node_instances <= NUM_PRECALCULATED_LOG2_X
+                                     ? string_entropy2 + log2_x[node_instances - 1] - log_file_symbols
+                                     : string_entropy2 + log2(repeats) - log_file_symbols;
+            bits_saved2 = (repeats * profit_per_substitution2) - new_rule_cost;
             if (bits_saved2 > 0.0) {
-              score = score * (1.0 - order_ratio) + (order_ratio
+              score = (score * (1.0 - order_ratio)) + (order_ratio
                 * (log2(bits_saved2) + profit_ratio_power * log2(profit_per_substitution2 / string_entropy2) - penalty));
               score += 40.0;
-              if (score > min_score)
+              if (score > min_score) {
                 send_score = 0;
+              }
             }
           }
         }
@@ -1698,31 +1712,32 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
             string_profit -= (double)instances * log2((double)instances);
             bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
           }
-          if ((node_instances == instances) && (*symbol_ptr >= num_terminals))
+          if ((node_instances == instances) && (*symbol_ptr >= num_terminals)) {
             string_profit += new_rule_cost;
+          }
           string_entropy += symbol_entropy[*symbol_ptr++];
         }
         string_entropy2 = first_symbol_entropy;
         short_score = min_score;
         if ((*symbol_ptr == 0x20) && (*(symbol_ptr + 1) != 0x20)) {
           double temp_bits_saved;
-          if ((node_instances - 1) * (num_symbols + num_extra_symbols - 2) < 0x400)
-            temp_bits_saved = nfs_profit[(node_instances - 1) * (num_symbols + num_extra_symbols - 2)];
-          else
-            temp_bits_saved = num_file_symbols_p1_x_log_file_symbols_p1
-              - ((double)(num_file_symbols + 1 - (node_instances - 1) * (num_symbols + num_extra_symbols - 2))
-                * log2((double)(num_file_symbols + 1 - (node_instances - 1) * (num_symbols + num_extra_symbols - 2))));
+          temp_bits_saved = (node_instances - 1) * (num_symbols + num_extra_symbols - 2) < 0x400
+                          ? nfs_profit[(node_instances - 1) * (num_symbols + num_extra_symbols - 2)]
+                          : num_file_symbols_p1_x_log_file_symbols_p1
+                            - ((double)(num_file_symbols + 1 - ((node_instances - 1) * (num_symbols + num_extra_symbols - 2)))
+                              * log2((double)(num_file_symbols + 1 - ((node_instances - 1) * (num_symbols + num_extra_symbols - 2)))));
           temp_bits_saved += bits_saved + string_profit;
 
           // calculate score
           if (temp_bits_saved > 0.0) {
-            short_score = (profit_ratio_power + 1.0) * log2(temp_bits_saved)
-              - profit_ratio_power * log2(repeats * string_entropy) - 1.0;
+            short_score = ((profit_ratio_power + 1.0) * log2(temp_bits_saved))
+              - (profit_ratio_power * log2(repeats * string_entropy)) - 1.0;
             if (order_ratio == 0.0) {
               short_score += 40.0;
-              if (short_score > min_score)
+              if (short_score > min_score) {
                 send_score = 1;
-            } else if ((short_score > 2.0 * min_score - 98.0) || (short_score > min_score - 40.5)) {
+              }
+            } else if ((short_score > (2.0 * min_score) - 98.0) || (short_score > min_score - 40.5)) {
               symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 2;
               while (symbol_ptr < end_symbol_ptr) {
                 string_entropy2 += log2(((double)num_ends[symbol_ends[*(symbol_ptr - 1)].end] - 0.9 * repeats)
@@ -1731,17 +1746,17 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
                     * (double)symbol_counts[*symbol_ptr]));
                 symbol_ptr++;
               }
-              if (node_instances <= NUM_PRECALCULATED_LOG2_X)
-                profit_per_substitution2 = string_entropy2 + log2_x[node_instances - 1] - log_file_symbols;
-              else
-                profit_per_substitution2 = string_entropy2 + log2(repeats) - log_file_symbols;
-              bits_saved2 = repeats * profit_per_substitution2 - new_rule_cost;
+              profit_per_substitution2 = node_instances <= NUM_PRECALCULATED_LOG2_X
+                                      ? string_entropy2 + log2_x[node_instances - 1] - log_file_symbols
+                                      : string_entropy2 + log2(repeats) - log_file_symbols;
+              bits_saved2 = (repeats * profit_per_substitution2) - new_rule_cost;
               if (bits_saved2 > 0.0) {
-                short_score = short_score * (1.0 - order_ratio) + (order_ratio
+                short_score = (short_score * (1.0 - order_ratio)) + (order_ratio
                   * (log2(bits_saved2) + profit_ratio_power * log2(profit_per_substitution2 / string_entropy2) - 1.0));
                 short_score += 40.0;
-                if (short_score > min_score)
+                if (short_score > min_score) {
                   send_score = 1;
+                }
               }
             }
           }
@@ -1755,20 +1770,20 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
           string_profit -= (double)instances * log2((double)instances);
           bits_saved += (double)(instances - node_instances + 1) * log2((double)(instances - node_instances + 1));
         }
-        if ((node_instances == instances) && (*symbol_ptr >= num_terminals))
+        if ((node_instances == instances) && (*symbol_ptr >= num_terminals)) {
           string_profit += new_rule_cost;
+        }
         string_entropy += symbol_entropy[*symbol_ptr];
-        if ((node_instances - 1) * (num_symbols + num_extra_symbols - 1) < 0x400)
-          bits_saved += nfs_profit[(node_instances - 1) * (num_symbols + num_extra_symbols - 1)];
-        else
-          bits_saved += num_file_symbols_p1_x_log_file_symbols_p1
-            - (double)(num_file_symbols + 1 - (node_instances - 1) * (num_symbols + num_extra_symbols - 1))
-            * log2((double)(num_file_symbols + 1 - (node_instances - 1) * (num_symbols + num_extra_symbols - 1)));
+        bits_saved += (node_instances - 1) * (num_symbols + num_extra_symbols - 1) < 0x400
+                    ? nfs_profit[(node_instances - 1) * (num_symbols + num_extra_symbols - 1)]
+                    : num_file_symbols_p1_x_log_file_symbols_p1
+                      - ((double)(num_file_symbols + 1 - ((node_instances - 1) * (num_symbols + num_extra_symbols - 1)))
+                      * log2((double)(num_file_symbols + 1 - ((node_instances - 1) * (num_symbols + num_extra_symbols - 1)))));
         bits_saved += string_profit;
 
         // calculate score
         if (bits_saved > 0.0) {
-          score = (profit_ratio_power + 1.0) * log2(bits_saved) - profit_ratio_power * log2(repeats * string_entropy);
+          score = ((profit_ratio_power + 1.0) * log2(bits_saved)) - (profit_ratio_power * log2(repeats * string_entropy));
           double penalty;
           if (*symbol_ptr == 0x20) {
             if (*(symbol_ptr + 1) != 0x20) {
@@ -1786,9 +1801,10 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
           }
           if (order_ratio == 0.0) {
             score += 40.0;
-            if ((score > min_score) && (score > short_score))
+            if ((score > min_score) && (score > short_score)) {
               send_score = 0;
-          } else if ((score > 2.0 * min_score - 98.0) || (score > min_score - 40.5)) {
+            }
+          } else if ((score > (2.0 * min_score) - 98.0) || (score > min_score - 40.5)) {
             if (string_entropy2 == first_symbol_entropy) {
               symbol_ptr = start_symbol_ptr + node_ptr->last_match_index - num_symbols + 2;
               while (symbol_ptr < end_symbol_ptr) {
@@ -1803,40 +1819,42 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
                 * (double)num_starts[symbol_ends[*symbol_ptr].start]
               / (((double)o1c[symbol_ends[*(symbol_ptr - 1)].end][symbol_ends[*symbol_ptr].start] - 0.9 * repeats)
                 * (double)symbol_counts[*symbol_ptr]));
-            if (node_instances <= NUM_PRECALCULATED_LOG2_X)
-              profit_per_substitution2 = string_entropy2 + log2_x[node_instances - 1] - log_file_symbols;
-            else
-              profit_per_substitution2 = string_entropy2 + log2(repeats) - log_file_symbols;
-            bits_saved2 = repeats * profit_per_substitution2 - new_rule_cost;
+            profit_per_substitution2 = node_instances <= NUM_PRECALCULATED_LOG2_X
+                                     ? string_entropy2 + log2_x[node_instances - 1] - log_file_symbols
+                                     : string_entropy2 + log2(repeats) - log_file_symbols;
+            bits_saved2 = (repeats * profit_per_substitution2) - new_rule_cost;
             if (bits_saved2 > 0.0) {
-              score = score * (1.0 - order_ratio) + (order_ratio
+              score = (score * (1.0 - order_ratio)) + (order_ratio
                 * (log2(bits_saved2) + profit_ratio_power * log2(profit_per_substitution2 / string_entropy2) - penalty));
               score += 40.0;
-              if ((score > min_score) && (score > short_score))
+              if ((score > min_score) && (score > short_score)) {
                 send_score = 0;
+              }
             }
           }
         }
       }
       if (send_score >= 0) {
         struct node * child_ptr = &nodes[node_ptr->child_node_num];
-        if ((node_ptrs_num & 0xFFF) == 0)
+        if ((node_ptrs_num & 0xFFF) == 0) {
           while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
               >= 0xF000); // wait
+        }
         rank_scores_buffer[node_ptrs_num].score = score;
         rank_scores_buffer[node_ptrs_num].num_symbols = num_symbols + num_extra_symbols - send_score;
         rank_scores_buffer[node_ptrs_num].last_match_index = child_ptr->last_match_index - 1 - send_score;
         rank_scores_buffer[node_ptrs_num].last_match_index2 = node_ptr->last_match_index + num_extra_symbols - send_score;
         if (rank_scores_buffer[node_ptrs_num].last_match_index == rank_scores_buffer[node_ptrs_num].last_match_index2) {
           int32_t * sibling_node_num_ptr = &child_ptr->sibling_node_num[0];
-          if (*sibling_node_num_ptr > 0)
+          if (*sibling_node_num_ptr > 0) {
             rank_scores_buffer[node_ptrs_num].last_match_index = nodes[*sibling_node_num_ptr].last_match_index - 1 - send_score;
-          else if (*sibling_node_num_ptr != 0)
+          } else if (*sibling_node_num_ptr != 0) {
             rank_scores_buffer[node_ptrs_num].last_match_index = *sibling_node_num_ptr + 0x7FFFFFFF - send_score;
-          else if (*(sibling_node_num_ptr + 1) > 0)
+          } else if (*(sibling_node_num_ptr + 1) > 0) {
             rank_scores_buffer[node_ptrs_num].last_match_index = nodes[*(sibling_node_num_ptr + 1)].last_match_index - 1 - send_score;
-          else if (*(sibling_node_num_ptr + 1) != 0)
+          } else if (*(sibling_node_num_ptr + 1) != 0) {
             rank_scores_buffer[node_ptrs_num].last_match_index = *(sibling_node_num_ptr + 1) + 0x7FFFFFFF - send_score;
+          }
         }
         atomic_store_explicit(&rank_scores_write_index, ++node_ptrs_num, memory_order_release);
       }
@@ -1861,9 +1879,9 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
         sib_node_num = node_ptr->sibling_node_num[1];
         tnp = &nodes[sib_node_num];
         if ((sib_node_num > 0)
-            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0)))
+            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
           node_ptr = &nodes[sib_node_num]; // move to sibling 1 - prior symbol unchanged (okay)
-        else {
+        } else {
           if (level == 0) {
             *node_ptrs_num_ptr = node_ptrs_num;
             return;
@@ -1873,11 +1891,13 @@ static void score_base_node_tree_cap(struct node *node_ptr, struct score_data *n
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0) {
               node_data[level++].next_sibling = 1; // put sibling 1 on stack
+            }
             node_ptr = &nodes[node_ptr->sibling_node_num[0]]; // move to sibling 0
-          } else
+          } else {
             node_ptr = &nodes[node_ptr->sibling_node_num[1]]; // move to sibling 1
+          }
         }
       }
     }
@@ -1907,30 +1927,32 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
       if (num_extra_symbols == 0) {
         string_entropy += symbol_entropy[symbol];
         // calculate score
-        if (node_instances < NUM_PRECALCULATED_SYMBOL_COSTS)
-          profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
-        else
-          profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
-        bits_saved = repeats * profit_per_substitution - production_cost;
+        profit_per_substitution = node_instances < NUM_PRECALCULATED_SYMBOL_COSTS
+                                ? string_entropy - new_symbol_cost[node_instances]
+                                : string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
+        bits_saved = (repeats * profit_per_substitution) - production_cost;
         if (bits_saved > min_score) {
           float profit_ratio = profit_per_substitution / string_entropy;
-          score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio);
-          if (symbol == 0x20)
+          score = log2f(bits_saved) + (profit_ratio_power * log2f(profit_ratio));
+          if (symbol == 0x20) {
             score -= 0.25;
-          else if ((symbol & 0xF2) != 0x42)
+          } else if ((symbol & 0xF2) != 0x42) {
             score += 1.125;
-          else
+          } else {
             score += 2.125;
-          if (score > min_score)
+          }
+          if (score > min_score) {
             send_score = 0;
+          }
         }
       } else {
         uint32_t * symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
         uint32_t * node_string_end_ptr = symbol_ptr + num_extra_symbols;
         if (node_string_end_ptr < end_symbol_ptr) {
           string_entropy += symbol_entropy[*symbol_ptr++];
-          while (symbol_ptr < node_string_end_ptr)
+          while (symbol_ptr < node_string_end_ptr) {
             string_entropy += symbol_entropy[*symbol_ptr++];
+          }
 
           if (symbol_ptr < end_symbol_ptr) {
             if ((*symbol_ptr == 0x20) && (*(symbol_ptr - 1) != 0x20)) {
@@ -1938,12 +1960,13 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
               profit_per_substitution = node_instances < NUM_PRECALCULATED_SYMBOL_COSTS
                                       ? string_entropy - new_symbol_cost[node_instances]
                                       : string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
-              bits_saved = repeats * profit_per_substitution - production_cost;
+              bits_saved = (repeats * profit_per_substitution) - production_cost;
               if (bits_saved > min_score) {
                 float profit_ratio = profit_per_substitution / (string_entropy + symbol_entropy[0x20]);
-                score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio) + 1.125;
-                if (score > min_score)
+                score = log2f(bits_saved) + (profit_ratio_power * log2f(profit_ratio)) + 1.125;
+                if (score > min_score) {
                   send_score = 1;
+                }
               }
             }
 
@@ -1953,18 +1976,20 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
               profit_per_substitution = node_instances < NUM_PRECALCULATED_SYMBOL_COSTS
                                       ? string_entropy - new_symbol_cost[node_instances]
                                       : string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
-              bits_saved = repeats * profit_per_substitution - production_cost;
+              bits_saved = (repeats * profit_per_substitution) - production_cost;
               if (bits_saved > min_score) {
                 float profit_ratio = profit_per_substitution / string_entropy;
                 score = log2f(bits_saved) + profit_ratio_power * log2f(profit_ratio);
-                if (*symbol_ptr == 0x20)
+                if (*symbol_ptr == 0x20) {
                   score -= 0.25;
-                else if (((*symbol_ptr) & 0xF2) != 0x42)
+                } else if (((*symbol_ptr) & 0xF2) != 0x42) {
                   score += 1.125;
-                else
+                } else {
                   score += 2.125;
-                if (score > min_score)
+                }
+                if (score > min_score) {
                   send_score = 0;
+                }
               }
             }
           }
@@ -1972,9 +1997,10 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
       }
       if (send_score >= 0) {
         uint32_t new_score_lmi = node_ptr->last_match_index + num_extra_symbols;
-        if ((node_ptrs_num & 0xFFF) == 0)
+        if ((node_ptrs_num & 0xFFF) == 0) {
           while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
               >= 0xF000); // wait
+        }
         rank_scores_buffer[node_ptrs_num].score = score;
         rank_scores_buffer[node_ptrs_num].last_match_index = new_score_lmi - send_score;
         rank_scores_buffer[node_ptrs_num].num_symbols = num_symbols + num_extra_symbols - send_score;
@@ -2005,9 +2031,9 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
         sib_node_num = node_ptr->sibling_node_num[1];
         tnp = &nodes[sib_node_num];
         if ((sib_node_num > 0)
-            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0)))
+            && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
           node_ptr = &nodes[sib_node_num];
-        else {
+        } else {
           if (level == 0) {
             *node_ptrs_num_ptr = node_ptrs_num;
             return;
@@ -2016,11 +2042,13 @@ static void score_base_node_tree_cap_fast(struct node *node_ptr, struct score_da
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0) {
               node_data[level++].next_sibling = 1;
+            }
             node_ptr = &nodes[node_ptr->sibling_node_num[0]];
-          } else
+          } else {
             node_ptr = &nodes[node_ptr->sibling_node_num[1]];
+          }
         }
       }
     }
@@ -2044,19 +2072,23 @@ static void score_base_node_tree_words(struct node* node_ptr, struct score_data 
     if (node_instances >= 2) {
       uint32_t num_extra_symbols = 0;
       uint32_t lmi = node_ptr->last_match_index;
-      if (lmi >= stream_len)
+      if (lmi >= stream_len) {
         goto score_siblings;
+      }
       while (num_extra_symbols != node_ptr->num_extra_symbols) {
-        if (lmi + num_extra_symbols >= stream_len)
+        if (lmi + num_extra_symbols >= stream_len) {
           goto score_siblings;
+        }
         string_entropy += symbol_entropy[*(start_symbol_ptr + lmi + num_extra_symbols++)];
       }
-      if (lmi + num_extra_symbols >= stream_len)
+      if (lmi + num_extra_symbols >= stream_len) {
         goto score_siblings;
+      }
       if (*(start_symbol_ptr + lmi + num_extra_symbols) == 0x20) {
         // calculate score
-        if (num_extra_symbols == 0)
+        if (num_extra_symbols == 0) {
           goto score_siblings;
+        }
         uint32_t last_symbol = *(start_symbol_ptr + lmi + num_extra_symbols - 1);
         if (((last_symbol >= (uint32_t)'a') && (last_symbol <= (uint32_t)'z'))
             || ((last_symbol >= (uint32_t)'0') && (last_symbol <= (uint32_t)'9')) || (last_symbol >= 0x80)) {
@@ -2066,13 +2098,15 @@ static void score_base_node_tree_words(struct node* node_ptr, struct score_data 
                                   ? string_entropy - new_symbol_cost[node_instances]
                                   : string_entropy - (log2_num_symbols_plus_substitution_cost - log2f(repeats));
           if (profit_per_substitution >= 0.0) {
-            float score = repeats * profit_per_substitution - production_cost;
+            float score = (repeats * profit_per_substitution) - production_cost;
             if (score > min_score) {
-              if (node_ptrs_num >= 0xFFFE)
+              if (node_ptrs_num >= 0xFFFE) {
                 goto score_siblings;
-              if ((node_ptrs_num & 0xFFF) == 0)
+              }
+              if ((node_ptrs_num & 0xFFF) == 0) {
                 while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
                     >= 0xF000); // wait
+              }
               rank_scores_buffer[node_ptrs_num].score = score;
               rank_scores_buffer[node_ptrs_num].last_match_index = node_ptr->last_match_index + num_extra_symbols - 1;
               rank_scores_buffer[node_ptrs_num].num_symbols = num_symbols + num_extra_symbols - 1;
@@ -2082,8 +2116,9 @@ static void score_base_node_tree_words(struct node* node_ptr, struct score_data 
         }
         goto score_siblings;
       }
-      if (lmi + num_extra_symbols >= stream_len)
+      if (lmi + num_extra_symbols >= stream_len) {
         goto score_siblings;
+      }
       string_entropy += symbol_entropy[*(start_symbol_ptr + lmi + num_extra_symbols)];
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
         if (level < NODE_DATA_STACK_DEPTH - 1) {
@@ -2093,21 +2128,22 @@ static void score_base_node_tree_words(struct node* node_ptr, struct score_data 
         }
       }
       num_symbols += num_extra_symbols + 1;
-      if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit)
+      if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit) {
         goto score_siblings;
+      }
       node_ptr = &nodes[node_ptr->child_node_num];
     } else {
 score_siblings:
       sib_node_num = node_ptr->sibling_node_num[0];
-      if (sib_node_num <= 0 || (uint32_t)sib_node_num >= nodes_num_limit)
+      if (sib_node_num <= 0 || (uint32_t)sib_node_num >= nodes_num_limit) {
         sib_node_num = 0;
+      }
       struct node * tnp = sib_node_num ? &nodes[sib_node_num] : node_ptr;
       if ((sib_node_num > 0)
           && ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
-        if (node_ptr->sibling_node_num[1] > 0 && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit)
-          tnp = &nodes[node_ptr->sibling_node_num[1]];
-        else
-          tnp = node_ptr;
+        tnp = node_ptr->sibling_node_num[1] > 0 && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit
+            ? &nodes[node_ptr->sibling_node_num[1]]
+            : node_ptr;
         if ((node_ptr->sibling_node_num[1] > 0) && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) || (tnp->sibling_node_num[1] > 0))) {
           if (level < NODE_DATA_STACK_DEPTH - 1) {
@@ -2119,9 +2155,9 @@ score_siblings:
         node_ptr = &nodes[sib_node_num];
       } else {
         sib_node_num = node_ptr->sibling_node_num[1];
-        if (sib_node_num > 0 && (uint32_t)sib_node_num < nodes_num_limit)
+        if (sib_node_num > 0 && (uint32_t)sib_node_num < nodes_num_limit) {
           node_ptr = &nodes[sib_node_num];
-        else {
+        } else {
           if (level == 0) {
             *node_ptrs_num_ptr = node_ptrs_num;
             return;
@@ -2130,13 +2166,16 @@ score_siblings:
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0 && level < NODE_DATA_STACK_DEPTH - 1)
+            if (node_ptr->sibling_node_num[1] > 0 && level < NODE_DATA_STACK_DEPTH - 1) {
               node_data[level++].next_sibling = 1;
-            if (node_ptr->sibling_node_num[0] > 0 && (uint32_t)node_ptr->sibling_node_num[0] < nodes_num_limit)
+            }
+            if (node_ptr->sibling_node_num[0] > 0 && (uint32_t)node_ptr->sibling_node_num[0] < nodes_num_limit) {
               node_ptr = &nodes[node_ptr->sibling_node_num[0]];
+            }
           } else if (node_ptr->sibling_node_num[1] > 0
-              && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit)
+              && (uint32_t)node_ptr->sibling_node_num[1] < nodes_num_limit) {
             node_ptr = &nodes[node_ptr->sibling_node_num[1]];
+          }
         }
       }
     }
@@ -2155,17 +2194,19 @@ static void score_symbol_tree(uint32_t min_symbol, uint32_t max_symbol, struct n
       next_base_node_child_num_ptr = base_node_child_num_ptr + BASE_NODES_CHILD_ARRAY_SIZE;
       do {
         if (*base_node_child_num_ptr > 0) {
-          if (cap_encoded != 0)
+          if (cap_encoded != 0) {
             score_base_node_tree_cap(&nodes[*base_node_child_num_ptr], node_data, profit_ratio_power, symbol_entropy,
                 rank_scores_buffer, node_ptrs_num_ptr, symbol);
-          else
+          } else {
             score_base_node_tree(&nodes[*base_node_child_num_ptr], node_data, profit_ratio_power, symbol_entropy,
                 rank_scores_buffer, node_ptrs_num_ptr, symbol);
+          }
         }
         base_node_child_num_ptr++;
       } while (base_node_child_num_ptr != next_base_node_child_num_ptr);
-    } else
+    } else {
       base_node_child_num_ptr += 16;
+    }
     symbol++;
   }
 }
@@ -2183,19 +2224,21 @@ static void score_symbol_tree_fast(uint32_t min_symbol, uint32_t max_symbol, str
       next_base_node_child_num_ptr = base_node_child_num_ptr + BASE_NODES_CHILD_ARRAY_SIZE;
       do {
         if (*base_node_child_num_ptr > 0) {
-          if (cap_encoded != 0)
+          if (cap_encoded != 0) {
             score_base_node_tree_cap_fast(&nodes[*base_node_child_num_ptr], node_data, symbol_entropy[symbol],
                 production_cost, (float)profit_ratio_power, log2_num_symbols_plus_substitution_cost, new_symbol_cost,
                 symbol_entropy, rank_scores_buffer, node_ptrs_num_ptr);
-          else
+          } else {
             score_base_node_tree_fast(&nodes[*base_node_child_num_ptr], node_data, symbol_entropy[symbol],
                 production_cost, (float)profit_ratio_power, log2_num_symbols_plus_substitution_cost, new_symbol_cost,
                 symbol_entropy, rank_scores_buffer, node_ptrs_num_ptr);
+          }
         }
         base_node_child_num_ptr++;
       } while (base_node_child_num_ptr != next_base_node_child_num_ptr);
-    } else
+    } else {
       base_node_child_num_ptr += 16;
+    }
     symbol++;
   }
 }
@@ -2207,10 +2250,11 @@ static void score_symbol_tree_words(struct node_score_data *rank_scores_buffer, 
   int32_t * base_node_child_num_ptr = &base_nodes_child_node_num[0];
   int32_t * base_node_child_num_end_ptr = &base_nodes_child_node_num[0x90];
   do {
-    if (*base_node_child_num_ptr > 0)
+    if (*base_node_child_num_ptr > 0) {
       score_base_node_tree_words(&nodes[*base_node_child_num_ptr], node_data, production_cost,
           log2_num_symbols_plus_substitution_cost, new_symbol_cost, symbol_entropy, rank_scores_buffer,
           node_ptrs_num_ptr);
+    }
   } while (++base_node_child_num_ptr <= base_node_child_num_end_ptr);
 }
 
@@ -2321,15 +2365,18 @@ static void *overlap_check_thread(void *arg) {
   uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
   uint32_t num_prior_matches = 0;
 
-  for (symbol = 0 ; symbol < num_overlaps ; symbol++)
+  for (symbol = 0 ; symbol < num_overlaps ; symbol++) {
     thread_data_ptr->next[symbol] = -1;
+  }
 
 thread_overlap_check_loop_no_match:
   symbol = *in_symbol_ptr++;
-  if (in_symbol_ptr >= end_symbol_ptr)
+  if (in_symbol_ptr >= end_symbol_ptr) {
     return 0;
-  if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+  }
+  if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0)) {
     goto thread_overlap_check_loop_no_match;
+  }
   match_node_ptr = child_ptr_array[symbol];
 thread_overlap_check_loop_match:
   symbol = *in_symbol_ptr++;
@@ -2341,8 +2388,9 @@ thread_overlap_check_loop_match:
         shifted_symbol >>= 4;
       } else {
         if (match_node_ptr->miss_ptr == 0) {
-          if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+          if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0)) {
             goto thread_overlap_check_loop_no_match;
+          }
           match_node_ptr = child_ptr_array[symbol];
           goto thread_overlap_check_loop_match;
         } else {
@@ -2386,15 +2434,18 @@ static void *overlap_check_no_defs_thread(void *arg) {
   uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
   uint32_t num_prior_matches = 0;
 
-  for (symbol = 0 ; symbol < num_overlaps ; symbol++)
+  for (symbol = 0 ; symbol < num_overlaps ; symbol++) {
     thread_data_ptr->next[symbol] = -1;
+  }
 
 thread_overlap_check_no_defs_loop_no_match:
   symbol = *in_symbol_ptr++;
-  if (in_symbol_ptr >= end_symbol_ptr)
+  if (in_symbol_ptr >= end_symbol_ptr) {
     return 0;
-  if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+  }
+  if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
     goto thread_overlap_check_no_defs_loop_no_match;
+  }
   match_node_ptr = child_ptr_array[symbol];
 thread_overlap_check_no_defs_loop_match:
   symbol = *in_symbol_ptr++;
@@ -2406,10 +2457,12 @@ thread_overlap_check_no_defs_loop_match:
         shifted_symbol >>= 4;
       } else {
         if (match_node_ptr->miss_ptr == 0) {
-          if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+          if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
             goto thread_overlap_check_no_defs_loop_no_match;
-          if (in_symbol_ptr > end_symbol_ptr)
+          }
+          if (in_symbol_ptr > end_symbol_ptr) {
             return 0;
+          }
           match_node_ptr = child_ptr_array[symbol];
           goto thread_overlap_check_no_defs_loop_match;
         } else {
@@ -2420,9 +2473,11 @@ thread_overlap_check_no_defs_loop_match:
     } while (symbol != match_node_ptr->symbol);
   }
   if (match_node_ptr->child_ptr != 0) {
-    if (in_symbol_ptr > end_symbol_ptr)
-      if (in_symbol_ptr - match_node_ptr->num_symbols >= end_symbol_ptr)
+    if (in_symbol_ptr > end_symbol_ptr) {
+      if (in_symbol_ptr - match_node_ptr->num_symbols >= end_symbol_ptr) {
         return 0;
+      }
+    }
     match_node_ptr = match_node_ptr->child_ptr;
     goto thread_overlap_check_no_defs_loop_match;
   }
@@ -2463,8 +2518,9 @@ thread_symbol_substitution_loop_top:
     match_node_ptr = child_ptr_array[0];
     symbol = *in_symbol_ptr++;
     if ((int32_t)symbol < 0) {
-      if (in_symbol_ptr < end_symbol_ptr)
+      if (in_symbol_ptr < end_symbol_ptr) {
         goto thread_symbol_substitution_loop_top;
+      }
       goto thread_symbol_substitution_loop_end;
     } else {
 thread_symbol_substitution_loop_match_search:
@@ -2477,24 +2533,28 @@ thread_symbol_substitution_loop_match_search:
           } else { // no match, so use miss node and output missed symbols
             if (match_node_ptr->miss_ptr == 0) {
               if (symbol == 0x20) {
-                if (in_symbol_ptr > end_symbol_ptr)
+                if (in_symbol_ptr > end_symbol_ptr) {
                   goto thread_symbol_substitution_loop_end;
+                }
                 if ((int32_t)*in_symbol_ptr >= 0) {
                   match_node_ptr = child_ptr_array[0];
                   symbol = *in_symbol_ptr++;
                   goto thread_symbol_substitution_loop_match_search;
                 }
-                if (++in_symbol_ptr < end_symbol_ptr)
+                if (++in_symbol_ptr < end_symbol_ptr) {
                   goto thread_symbol_substitution_loop_top;
+                }
                 goto thread_symbol_substitution_loop_end;
               }
-              if (in_symbol_ptr < end_symbol_ptr)
+              if (in_symbol_ptr < end_symbol_ptr) {
                 goto thread_symbol_substitution_loop_top;
+              }
               goto thread_symbol_substitution_loop_end;
             }
             if ((in_symbol_ptr > end_symbol_ptr)
-                && (in_symbol_ptr - match_node_ptr->miss_ptr->num_symbols >= end_symbol_ptr))
+                && (in_symbol_ptr - match_node_ptr->miss_ptr->num_symbols >= end_symbol_ptr)) {
               goto thread_symbol_substitution_loop_end;
+            }
             match_node_ptr = match_node_ptr->miss_ptr;
             sibling_nibble = symbol;
           }
@@ -2505,14 +2565,16 @@ thread_symbol_substitution_loop_match_search:
         if ((int32_t)symbol >= 0) {
           match_node_ptr = match_node_ptr->child_ptr;
           goto thread_symbol_substitution_loop_match_search;
-        } else
+        } else {
           goto thread_symbol_substitution_loop_match_no_match;
+        }
       }
       // found a match
       while ((((substitute_index - local_read_index) & 0x7FFFFC) == 0x7FFFFC)
           && (((substitute_index - (local_read_index = atomic_load_explicit(&thread_data_ptr->read_index,
-            memory_order_acquire))) & 0x7FFFFC) == 0x7FFFFC))
+            memory_order_acquire))) & 0x7FFFFC) == 0x7FFFFC)) {
         sched_yield();
+      }
       if (in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols != 0) {
         thread_data_ptr->data[substitute_index] = in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols;
         substitute_index = (substitute_index + 1) & 0x7FFFFF;
@@ -2523,24 +2585,28 @@ thread_symbol_substitution_loop_match_search:
       substitute_index = (substitute_index + 1) & 0x7FFFFF;
       atomic_store_explicit(&thread_data_ptr->write_index, substitute_index, memory_order_release);
       previous_in_symbol_ptr = in_symbol_ptr;
-      if (in_symbol_ptr < end_symbol_ptr)
+      if (in_symbol_ptr < end_symbol_ptr) {
         goto thread_symbol_substitution_loop_top;
+      }
       thread_data_ptr->extra_match_symbols = in_symbol_ptr - end_symbol_ptr;
       goto thread_symbol_substitution_loop_end2;
     }
 thread_symbol_substitution_loop_match_no_match:
-    if (in_symbol_ptr < end_symbol_ptr)
+    if (in_symbol_ptr < end_symbol_ptr) {
       goto thread_symbol_substitution_loop_top;
+    }
     goto thread_symbol_substitution_loop_end;
   }
-  if (in_symbol_ptr < end_symbol_ptr)
+  if (in_symbol_ptr < end_symbol_ptr) {
     goto thread_symbol_substitution_loop_top;
+  }
 
 thread_symbol_substitution_loop_end:
   while ((((substitute_index - local_read_index) & 0x7FFFFF) == 0x7FFFFF)
      && (((substitute_index - (local_read_index = atomic_load_explicit(&thread_data_ptr->read_index,
-          memory_order_acquire))) & 0x7FFFFF) == 0x7FFFFF))
+          memory_order_acquire))) & 0x7FFFFF) == 0x7FFFFF)) {
     sched_yield();
+  }
   thread_data_ptr->data[substitute_index] = end_symbol_ptr - previous_in_symbol_ptr;
   substitute_index = (substitute_index + 1) & 0x7FFFFF;
   atomic_store_explicit(&thread_data_ptr->write_index, substitute_index, memory_order_release);
@@ -2576,8 +2642,9 @@ static void *substitute_thread(void *arg) {
         }
         *thread_data_ptr->out_symbol_ptr++ = symbol;
         thread_data_ptr->symbol_counts[symbol]++;
-      } else
+      } else {
         return 0;
+      }
       atomic_store_explicit(&substitute_data_read_index, substitute_data_index, memory_order_relaxed);
     } while (local_write_index != substitute_data_index);
   }
@@ -2659,9 +2726,6 @@ static float update_cycle_start_ratio(
   return 1.0 - (0.97 * (cycle_end_ratio - cycle_start_ratio));
 }
 
-static double xlogx(double arg) {
-  return arg * log2(arg);
-}
 
 static void main_loop_init(
   uint32_t *out_next_new_symbol_number,
@@ -2815,31 +2879,37 @@ static void scan_mode0(
 ) {
   // build the words suffix tree (single-threaded for correctness on ARM)
   int32_t* base_node_child_num_ptr = &base_nodes_child_node_num[0];
-  while (base_node_child_num_ptr <= base_nodes_child_node_num + 0x90)
+  while (base_node_child_num_ptr <= base_nodes_child_node_num + 0x90) {
     *base_node_child_num_ptr++ = 0;
+  }
 
   uint32_t next_node_num = 1;
   uint32_t* in_symbol_ptr = start_symbol_ptr;
   uint8_t word_start[0x80]; /* ASCII-ish set marking symbols that may start a word after space (0x20) */
-  for (size_t i = 0 ; i < 0x80 ; i++)
+  for (size_t i = 0 ; i < 0x80 ; i++) {
     word_start[i] = 0;
-  for (size_t i = 'a' ; i <= 'z' ; i++)
+  }
+  for (size_t i = 'a' ; i <= 'z' ; i++) {
     word_start[i] = 1;
-  for (size_t i = '0' ; i <= '9' ; i++)
+  }
+  for (size_t i = '0' ; i <= '9' ; i++) {
     word_start[i] = 1;
+  }
   word_start['$'] = 1;
 
   uint32_t symbol;
   while (1) {
-    if (in_symbol_ptr >= end_symbol_ptr)
+    if (in_symbol_ptr >= end_symbol_ptr) {
       break;
+    }
     symbol = *in_symbol_ptr++;
     if (symbol == 0x20) {
       if (in_symbol_ptr < end_symbol_ptr && (int32_t)*in_symbol_ptr >= 0
           && (((*in_symbol_ptr >= 0x80) && (UTF8_compliant != 0))
           || ((*in_symbol_ptr < 0x80) && (word_start[*in_symbol_ptr] != 0)))) {
-        if (next_node_num < node_num_limit - 10)
+        if (next_node_num < node_num_limit - 10) {
           add_word_suffix(in_symbol_ptr, &next_node_num);
+        }
       }
     } else if (symbol == 0xFFFFFFFE) {
       in_symbol_ptr--;
@@ -2853,10 +2923,11 @@ static void scan_mode0(
     size_t i = 0;
     do {
       if (symbol_counts[i] != 0) {
-        if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X)
+        if (symbol_counts[i] < NUM_PRECALCULATED_LOG2_X) {
           symbol_entropy_f[i] = (float)(log_file_symbols - log2_x[symbol_counts[i]]);
-        else
+        } else {
           symbol_entropy_f[i] = (float)log_file_symbols - log2f((float)symbol_counts[i]);
+        }
       }
     } while (++i < next_new_symbol_number);
   }
@@ -2876,13 +2947,13 @@ static void scan_mode0(
   *out_prior_cycle_symbols = in_symbol_ptr - start_symbol_ptr;
   float min_score;
   min_score = fast_mode == 0 
-            ? (float)(1000.0 + 400.0 * (log2(order_0_entropy + 3000000.0) - log2(3000000.0)))
+            ? (float)(1000.0 + (400.0 * (log2(order_0_entropy + 3000000.0) - log2(3000000.0))))
             : (float)(5.0 + (log2(d_num_file_symbols + 5000000.0) - log2(5000000.0)));
   uint16_t num_candidates = rank_scores_data_ptr->num_candidates;
   if (next_new_symbol_number + num_candidates > max_rules) {
-    if (max_rules > next_new_symbol_number)
+    if (max_rules > next_new_symbol_number) {
       num_candidates = max_rules - next_new_symbol_number;
-    else {
+    } else {
       fprintf(stderr,
           "GLZA compress: no room for word candidates (next_new_symbol_number=%u max_rules=%u)\n",
           (unsigned int)next_new_symbol_number, (unsigned int)max_rules);
@@ -2922,10 +2993,11 @@ static void scan_mode0(
     
     // __jm__ simplify with lambda
     uintptr_t match_region_end_limit = end_RAM_ptr;
-    if (use_substitute_heap != 0)
+    if (use_substitute_heap != 0) {
       match_region_end_limit = (uintptr_t)substitute_base + substitute_heap_size;
-    else if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
+    } else if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit) {
       match_region_end_limit = (uintptr_t)nodes;
+    }
 
     uint32_t match_nodes_limit = (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes)
         / sizeof(struct match_node)); /* derived bound; num_match_nodes checked against this */
@@ -2934,12 +3006,14 @@ static void scan_mode0(
     {
       size_t candidate_num = 0;
       while (candidate_num < num_candidates) {
-        if (candidates[candidates_index[candidate_num]].num_symbols > max_match_length)
+        if (candidates[candidates_index[candidate_num]].num_symbols > max_match_length) {
           max_match_length = candidates[candidates_index[candidate_num]].num_symbols;
-        if (candidates[candidates_index[candidate_num]].score < min_score)
+        }
+        if (candidates[candidates_index[candidate_num]].score < min_score) {
           num_candidates = candidate_num;
+        }
         num_match_nodes += candidates[candidates_index[candidate_num]].num_symbols - 1;
-        if ((size_t)match_nodes + num_match_nodes * sizeof(struct match_node) + 4 * max_match_length
+        if ((size_t)match_nodes + (num_match_nodes * sizeof(struct match_node)) + (4 * max_match_length)
             >= match_region_end_limit) {
           num_candidates = candidate_num != 0
                          ? candidate_num - 1 
@@ -2949,7 +3023,7 @@ static void scan_mode0(
         candidate_num++;
       }
     }
-    uint32_t* match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
+    uint32_t* match_strings = (uint32_t *)((size_t)match_nodes + ((size_t)num_match_nodes * sizeof(struct match_node)));
     struct overlap_check* overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
     struct overlap_check* overlap_check_heap_buf = *ptr_overlap_check_heap_buf;
     uint8_t* candidate_bad = *ptr_candidate_bad;
@@ -2960,8 +3034,9 @@ static void scan_mode0(
     pthread_t find_substitutions_threads[7];
     struct find_substitutions_thread_data* find_substitutions_thread_data = *ptr_find_substitutions_thread_data;
     uint32_t first_define_index = *ptr_first_define_index;
-    if (num_candidates == 0)
+    if (num_candidates == 0) {
       goto skip_word_substitution;
+    }
 
     {
       size_t candidate_num = 0;
@@ -2970,12 +3045,13 @@ static void scan_mode0(
         uint32_t* match_string_start_ptr = &match_strings[candidate_num * max_match_length];
         uint32_t* node_string_start_ptr = start_symbol_ptr + candidates[candidates_index[candidate_num]].last_match_index
             - candidates[candidates_index[candidate_num]].num_symbols + 1;
-        for (size_t j = 0 ; j < candidates[candidates_index[candidate_num]].num_symbols ; j++)
+        for (size_t j = 0 ; j < candidates[candidates_index[candidate_num]].num_symbols ; j++) {
           *(match_string_start_ptr + j) = *(node_string_start_ptr + j);
+        }
         candidate_num++;
       }
     }
-    if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
+    if ((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)) > match_region_end_limit) {
       if (overlap_check_heap_buf == NULL) {
         overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
         if (overlap_check_heap_buf == NULL) {
@@ -2985,8 +3061,9 @@ static void scan_mode0(
       }
       overlap_check_data = overlap_check_heap_buf;
     }
-    for (size_t i = 1 ; i < 8 ; i++)
+    for (size_t i = 1 ; i < 8 ; i++) {
       overlap_check_data[i].candidate_bad = &candidate_bad[0];
+    }
 
     do {
       next_new_symbol_number = num_terminals + num_rules;
@@ -3021,8 +3098,9 @@ static void scan_mode0(
                 match_node_ptr = match_node_ptr->child_ptr;
                 uint8_t sibling_number;
                 if (move_to_match_sibling(match_nodes, &match_node_ptr, symbol, &sibling_number) != 0) {
-                  if (match_node_ptr->child_ptr == 0)
+                  if (match_node_ptr->child_ptr == 0) {
                     candidate_bad[match_node_ptr->score_number] = 1;
+                  }
                 } else {
                   if (num_match_nodes >= match_nodes_limit) {
                     candidate_bad[candidate_num] = 1;
@@ -3035,8 +3113,9 @@ static void scan_mode0(
               }
               best_score_match_ptr++;
             }
-            if (match_node_ptr->child_ptr != 0)
+            if (match_node_ptr->child_ptr != 0) {
               candidate_bad[candidate_num] = 1;
+            }
           }
           candidate_num++;
         }
@@ -3083,9 +3162,9 @@ static void scan_mode0(
           memset(find_substitutions_thread_data_buf, 0, 6 * sizeof(struct find_substitutions_thread_data));
         }
         find_substitutions_thread_data = find_substitutions_thread_data_buf;
-        stop_symbol_ptr = start_symbol_ptr + 64 * (num_file_symbols >> 9);
+        stop_symbol_ptr = start_symbol_ptr + (64 * (num_file_symbols >> 9));
         find_substitutions_thread_data[0].start_symbol_ptr = stop_symbol_ptr;
-        uint32_t* block_ptr = stop_symbol_ptr + 68 * (num_file_symbols >> 9);
+        uint32_t* block_ptr = stop_symbol_ptr + (68 * (num_file_symbols >> 9));
         find_substitutions_thread_data[0].stop_symbol_ptr = block_ptr;
         find_substitutions_thread_data[1].start_symbol_ptr = block_ptr;
         block_ptr += 72 * (num_file_symbols >> 9);
@@ -3130,8 +3209,9 @@ wmain_symbol_substitution_loop_top:
       if (*in_symbol_ptr++ == 0x20) {
         symbol = *in_symbol_ptr++;
         if ((int32_t)symbol < 0) {
-          if (in_symbol_ptr < stop_symbol_ptr)
+          if (in_symbol_ptr < stop_symbol_ptr) {
             goto wmain_symbol_substitution_loop_top;
+          }
           goto wmain_symbol_substitution_loop_end;
         } else {
           struct match_node* match_node_ptr = child_ptr_array[0];
@@ -3144,19 +3224,22 @@ wmain_symbol_substitution_loop_match_search:
                 sibling_nibble = sibling_nibble >> 4;
               } else { // no match, so output missed symbols
                 if (symbol == 0x20) {
-                  if (in_symbol_ptr > stop_symbol_ptr)
+                  if (in_symbol_ptr > stop_symbol_ptr) {
                     goto wmain_symbol_substitution_loop_end;
+                  }
                   symbol = *in_symbol_ptr++;
                   if ((int32_t)symbol >= 0) {
                     match_node_ptr = child_ptr_array[0];
                     goto wmain_symbol_substitution_loop_match_search;
                   }
-                  if (in_symbol_ptr < stop_symbol_ptr)
+                  if (in_symbol_ptr < stop_symbol_ptr) {
                     goto wmain_symbol_substitution_loop_top;
+                  }
                   goto wmain_symbol_substitution_loop_end;
                 }
-                if (in_symbol_ptr < stop_symbol_ptr)
+                if (in_symbol_ptr < stop_symbol_ptr) {
                   goto wmain_symbol_substitution_loop_top;
+                }
                 goto wmain_symbol_substitution_loop_end;
               }
             } while (symbol != match_node_ptr->symbol);
@@ -3167,8 +3250,9 @@ wmain_symbol_substitution_loop_match_search:
               match_node_ptr = match_node_ptr->child_ptr;
               goto wmain_symbol_substitution_loop_match_search;
             }
-            if (in_symbol_ptr < stop_symbol_ptr)
+            if (in_symbol_ptr < stop_symbol_ptr) {
               goto wmain_symbol_substitution_loop_top;
+            }
             goto wmain_symbol_substitution_loop_end;
           }
           // found a match
@@ -3176,34 +3260,40 @@ wmain_symbol_substitution_loop_match_search:
             fprintf(stderr, "ERROR - substitute_data buffer overflow\n");
             exit(1);
           }
-          if (((substitute_index + 2) & 0xFFFC) == 0)
+          if (((substitute_index + 2) & 0xFFFC) == 0) {
             while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
                 memory_order_acquire)) >= 0xFFF0); // wait
-          if (in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols != 0)
+          }
+          if (in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols != 0) {
             substitute_data[substitute_index++] = in_symbol_ptr - previous_in_symbol_ptr - match_node_ptr->num_symbols;
+          }
           substitute_data[substitute_index++] = 0x80000000 + match_node_ptr->num_symbols;
           substitute_data[substitute_index++] = match_node_ptr->score_number;
           atomic_store_explicit(&substitute_data_write_index, substitute_index, memory_order_release);
           previous_in_symbol_ptr = in_symbol_ptr;
-          if (in_symbol_ptr < stop_symbol_ptr)
+          if (in_symbol_ptr < stop_symbol_ptr) {
             goto wmain_symbol_substitution_loop_top;
+          }
           extra_match_symbols = in_symbol_ptr - stop_symbol_ptr;
           goto wmain_symbol_substitution_loop_end2;
         }
       }
-      if (in_symbol_ptr < stop_symbol_ptr)
+      if (in_symbol_ptr < stop_symbol_ptr) {
         goto wmain_symbol_substitution_loop_top;
+      }
 
 wmain_symbol_substitution_loop_end:
-      if ((substitute_index & 0xFFF) == 0)
+      if ((substitute_index & 0xFFF) == 0) {
         while ((substitute_index - atomic_load_explicit(&substitute_data_read_index,
             memory_order_acquire)) >= 0xFFF0); // wait
+      }
       substitute_data[substitute_index++] = stop_symbol_ptr - previous_in_symbol_ptr;
       atomic_store_explicit(&substitute_data_write_index, substitute_index, memory_order_release);
 wmain_symbol_substitution_loop_end2:
-      if ((substitute_index & 0xFFF) == 0)
+      if ((substitute_index & 0xFFF) == 0) {
         while (substitute_index != atomic_load_explicit(&substitute_data_read_index,
             memory_order_acquire)); // wait
+      }
       substitute_data[substitute_index++] = 0xFFFFFFFF;
       atomic_store_explicit(&substitute_data_write_index, substitute_index, memory_order_release);
       pthread_join(substitute_thread1, NULL);
@@ -3218,10 +3308,11 @@ wmain_symbol_substitution_loop_end2:
             while ((local_substitutions_write_index
                 = atomic_load_explicit(&find_substitutions_thread_data[i].write_index,
                     memory_order_acquire)) == 0); // wait
-            if (find_substitutions_thread_data[i].data[0] > extra_match_symbols)
+            if (find_substitutions_thread_data[i].data[0] > extra_match_symbols) {
               find_substitutions_thread_data[i].data[0] -= extra_match_symbols;
-            else
+            } else {
               substitutions_index = 1;
+            }
             extra_match_symbols = 0;
           }
 
@@ -3258,13 +3349,15 @@ wmain_symbol_substitution_loop_end2:
         }
       }
 
-      if (num_rules == 0)
+      if (num_rules == 0) {
         first_define_index = out_symbol_ptr - start_symbol_ptr;
-      else {
-        if (out_symbol_ptr < start_symbol_ptr + first_define_index)
+      } else {
+        if (out_symbol_ptr < start_symbol_ptr + first_define_index) {
           first_define_index = out_symbol_ptr - start_symbol_ptr; 
-        if (*(start_symbol_ptr + first_define_index) != 0x80000001)
+        }
+        if (*(start_symbol_ptr + first_define_index) != 0x80000001) {
           while (*(start_symbol_ptr + --first_define_index) != 0x80000001); // decrement index until found
+        }
       }
 
       // Add new production rules and update symbol counts
@@ -3275,7 +3368,7 @@ wmain_symbol_substitution_loop_end2:
           uint32_t *match_string_ptr;
           uint32_t *match_string_end_ptr;
           *out_symbol_ptr++ = num_rules + 0x80000001;
-          match_string_ptr = match_strings + max_match_length * i;
+          match_string_ptr = match_strings + (max_match_length * i);
           match_string_end_ptr = match_string_ptr + candidates[candidates_index[i]].num_symbols;
           uint32_t num_repeats = symbol_counts[num_terminals + num_rules] - 1;
           uint32_t sym1;
@@ -3294,8 +3387,9 @@ wmain_symbol_substitution_loop_end2:
             *out_symbol_ptr++ = *match_string_ptr++;
           }
           symbol_ends[num_terminals + num_rules++].end = symbol_ends[sym1].end;
-        } else if (candidate_bad[i] == 1)
+        } else if (candidate_bad[i] == 1) {
           candidate_bad[i] = 0;
+        }
       }
       end_symbol_ptr = out_symbol_ptr;
       *end_symbol_ptr = 0xFFFFFFFE;
@@ -3307,10 +3401,11 @@ wmain_symbol_substitution_loop_end2:
             (unsigned int)num_terminals);
         num_rules = j - num_terminals;
       }
+      if (fast_mode == 0) {
 #ifdef PRINTON
-      if (fast_mode == 0)
         fprintf(stderr, "Replaced %u of %u words\n", num_candidates_processed, num_candidates);
 #endif
+      }
     } while (num_candidates_processed != num_candidates);  // should go to end here if hit maximum dictionary size
     *ptr_first_define_index = first_define_index;
     *ptr_find_substitutions_thread_data_buf = find_substitutions_thread_data_buf;
@@ -3363,9 +3458,9 @@ static uint8_t scan_mode1(
   uint32_t symbol;
   do {
     symbol = *in_symbol_ptr++;
-    if (symbol == prior_symbol)
+    if (symbol == prior_symbol) {
       run_length++;
-    else {
+    } else {
       if (run_length != 0 && run_length > max_run_length[prior_symbol]) {
         max_run_length[prior_symbol] = run_length;
       }
@@ -3385,15 +3480,17 @@ static uint8_t scan_mode1(
       symbol_counts[next_new_symbol_number] = 0;
       new_symbol_number[i] = next_new_symbol_number++;
       found_run = 1;
-    } else
+    } else {
       max_run_length[i] = 0;
+    }
   }
 
   if (found_run != 0) {
+    if (fast_mode == 0) {
 #ifdef PRINTON
-    if (fast_mode == 0)
       fprintf(stderr, "Deduplicating runs\n");
 #endif
+    }
     run_length = 0;
     uint32_t* out_symbol_ptr = start_symbol_ptr;
     prior_symbol = *in_symbol_ptr;
@@ -3417,11 +3514,12 @@ static uint8_t scan_mode1(
 
     uint32_t num_rules = *p_num_rules;
     uint32_t first_define_index = *p_first_define_index;
-    if (num_rules == 0)
+    if (num_rules == 0) {
       first_define_index = out_symbol_ptr - start_symbol_ptr;
-    else {
-      if (out_symbol_ptr < start_symbol_ptr + first_define_index)
+    } else {
+      if (out_symbol_ptr < start_symbol_ptr + first_define_index) {
         first_define_index = out_symbol_ptr - start_symbol_ptr;
+      }
       if (*(start_symbol_ptr + first_define_index) != 0x80000001) // decrement index until found
         while (*(start_symbol_ptr + --first_define_index) != 0x80000001);
     }
@@ -3431,8 +3529,9 @@ static uint8_t scan_mode1(
       if (max_run_length[i] != 0) {
         *out_symbol_ptr++ = 0x80000001 + num_rules;
         uint32_t j = 0;
-        while (j++ != max_run_length[i])
+        while (j++ != max_run_length[i]) {
           *out_symbol_ptr++ = i;
+        }
         symbol_counts[i] -= max_run_length[i] * (symbol_counts[new_symbol_number[i]] - 1);
         o1c[i][i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
         num_ends[i] -= (max_run_length[i] - 1) * (symbol_counts[new_symbol_number[i]] - 1);
@@ -3444,10 +3543,7 @@ static uint8_t scan_mode1(
     end_symbol_ptr = out_symbol_ptr;
     *end_symbol_ptr = 0xFFFFFFFE;
     num_file_symbols = end_symbol_ptr - start_symbol_ptr;
-    if (fast_mode == 0)
-      min_score = 10.0;
-    else
-      min_score = 40.0;
+    min_score = fast_mode == 0 ? 10.0 : 40.0;
     *p_prior_min_score = BIG_FLOAT;
     *p_num_rules = num_rules;
     *p_first_define_index = first_define_index;
@@ -3638,8 +3734,9 @@ done_building_tree_tree:
       if (i < 6) {
         pthread_join(build_tree_threads[i], NULL);
         pthread_create(&build_tree_threads[i], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
-      } else
+      } else {
         pthread_join(build_tree_threads[i - 6], NULL);
+      }
 #ifdef PRINTON
       fprintf(stderr, ".");
 #endif
@@ -3648,9 +3745,10 @@ done_building_tree_tree:
           symbol_entropy, symbol_counts);
     }
 
-    if ((node_ptrs_num & 0xFFF) == 0)
+    if ((node_ptrs_num & 0xFFF) == 0) {
       while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
           >= 0xF000); // wait
+    }
     rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
     atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
     pthread_join(*rank_scores_thread1, NULL);
@@ -3690,15 +3788,17 @@ done_building_tree_tree:
       if (i <= 6) {
         pthread_join(build_tree_threads[i], NULL);
         pthread_create(&build_tree_threads[i - 1], NULL, build_tree_thread, (void *)&tree_thread_data[i + 6]);
-      } else
+      } else {
         pthread_join(build_tree_threads[i - 7], NULL);
+      }
       score_symbol_tree_fast(tree_thread_data[i].min_symbol, tree_thread_data[i].max_symbol,
           rank_scores_data_ptr->rank_scores_buffer, node_data, &node_ptrs_num, production_cost, profit_ratio_power,
           log2_num_symbols_plus_substitution_cost, new_symbol_cost, symbol_entropy_f, symbol_counts);
     }
-    if ((node_ptrs_num & 0xFFF) == 0)
+    if ((node_ptrs_num & 0xFFF) == 0) {
       while ((uint16_t)(node_ptrs_num - atomic_load_explicit(&rank_scores_read_index, memory_order_acquire))
           >= 0xF000); // wait
+    }
     rank_scores_data_ptr->rank_scores_buffer[node_ptrs_num].last_match_index = 0;
     atomic_store_explicit(&rank_scores_write_index, node_ptrs_num + 1, memory_order_release);
     pthread_join(*rank_scores_thread1, NULL);
@@ -3820,8 +3920,9 @@ static void process_ranked_candidates(
 
   free_RAM_ptr = (char *)(((size_t)end_symbol_ptr + 8) & ~7);
   uintptr_t match_region_end_limit = (uintptr_t)end_RAM_ptr;
-  if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit)
+  if (nodes != 0 && (uintptr_t)nodes < match_region_end_limit) {
     match_region_end_limit = (uintptr_t)nodes;
+  }
   struct node_score_data * tmp_candidates = (struct node_score_data *)free_RAM_ptr;
   memcpy(&tmp_candidates[0], &candidates[0], MAX_SCORES_FAST * sizeof(struct node_score_data));
   for (uint16_t candidate_num = 0 ; candidate_num < MAX_SCORES_FAST ; candidate_num++) {
@@ -3834,13 +3935,14 @@ static void process_ranked_candidates(
     fprintf(stderr, " score[0-%hu] = %.5f-%.5f\n", (unsigned short int)num_candidates - 1,
         candidates[0].score, candidates[num_candidates - 1].score);
 #endif
-    if (candidates[num_candidates - 1].score < 0.1 * candidates[0].score - 1.0) {
+    if (candidates[num_candidates - 1].score < (0.1 * candidates[0].score) - 1.0) {
       size_t candidate_num = 1;
       while ((candidate_num + 0x100 < num_candidates)
-          && (candidates[candidate_num + 0x100].score >= 0.1 * candidates[0].score - 1.0))
+          && (candidates[candidate_num + 0x100].score >= (0.1 * candidates[0].score) - 1.0)) {
         candidate_num += 0x100;
+      }
       while (candidate_num < num_candidates) {
-        if (candidates[candidate_num].score < 0.1 * candidates[0].score - 1.0) {
+        if (candidates[candidate_num].score < (0.1 * candidates[0].score) - 1.0) {
           num_candidates = candidate_num;
           break;
         }
@@ -3850,8 +3952,9 @@ static void process_ranked_candidates(
   } else if (fast_sections != 1) {
     section_scores[fast_section] = candidates[num_candidates - 1].score;
     uint8_t old_fast_section = fast_section; 
-    if (++fast_section == fast_sections)
+    if (++fast_section == fast_sections) {
       fast_section = 0;
+    }
     if (candidates[num_candidates - 1].score < fast_min_score) {
       if (fast_sections == 23) {
         fast_sections = 9;
@@ -4042,9 +4145,10 @@ static void process_ranked_candidates(
         best_score_num_symbols = 2;
         match_node_ptr = move_to_base_match_child_with_make(match_nodes, symbol, candidate_num, &num_match_nodes,
             child_ptr_ptr);
-        while (best_score_match_ptr <= best_score_last_match_ptr)
+        while (best_score_match_ptr <= best_score_last_match_ptr) {
           move_to_match_child_with_make(match_nodes, &match_node_ptr, *best_score_match_ptr++, candidate_num,
               ++best_score_num_symbols, &num_match_nodes);
+        }
       }
       candidate_num++;
     }
@@ -4074,21 +4178,25 @@ static void process_ranked_candidates(
           uint32_t *best_score_match_ptr;
           best_score_match_ptr = best_score_suffix_ptr;
           if (symbol < child_ptr_array_size && child_ptr_array[symbol] != 0) {
-            if ((match_node_ptr->child_ptr != 0) && (match_node_ptr->child_ptr->miss_ptr == 0))
+            if ((match_node_ptr->child_ptr != 0) && (match_node_ptr->child_ptr->miss_ptr == 0)) {
               write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, child_ptr_array[symbol]);
+            }
             struct match_node * search_node_ptr = child_ptr_array[symbol];
             while (best_score_match_ptr <= best_score_last_match_ptr) {
               // follow the tree until end of match string or find child = 0 or sibling = 0
               symbol = *best_score_match_ptr++;
               match_node_ptr = match_node_ptr->child_ptr;
               move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
-              if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
+              if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0) {
                 break;
+              }
               if (match_node_ptr->child_ptr == 0) {
-                if (match_node_ptr->hit_ptr == 0)
+                if (match_node_ptr->hit_ptr == 0) {
                   match_node_ptr->hit_ptr = search_node_ptr;
-              } else if (match_node_ptr->child_ptr->miss_ptr == 0)
+                }
+              } else if (match_node_ptr->child_ptr->miss_ptr == 0) {
                 write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr, search_node_ptr->child_ptr);
+              }
               if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
                 break;
               search_node_ptr = search_node_ptr->child_ptr;
@@ -4102,9 +4210,9 @@ static void process_ranked_candidates(
   }
 
   // save the match strings so they can be added to the end of the data after symbol substitution is done
-  match_strings = (uint32_t *)((size_t)match_nodes + (size_t)num_match_nodes * sizeof(struct match_node));
+  match_strings = (uint32_t *)((size_t)match_nodes + ((size_t)num_match_nodes * sizeof(struct match_node)));
   overlap_check_data = (struct overlap_check *)(((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7);
-  if ((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check) > match_region_end_limit) {
+  if ((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)) > match_region_end_limit) {
     if (overlap_check_heap_buf == 0) {
       overlap_check_heap_buf = (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
       if (overlap_check_heap_buf == 0) {
@@ -4143,7 +4251,7 @@ static void process_ranked_candidates(
     begin_matches = (uint32_t *)match_strings_end;
     matches_end_ptr = (uint32_t *)match_region_end_limit;
   } else {
-    begin_matches = (uint32_t *)((uintptr_t)overlap_check_data + 8 * sizeof(struct overlap_check));
+    begin_matches = (uint32_t *)((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)));
     matches_end_ptr = (uint32_t *)end_RAM_ptr;
   }
   if (begin_matches >= matches_end_ptr) {
@@ -4152,8 +4260,8 @@ static void process_ranked_candidates(
   {
     uint32_t matches_stride = (uint32_t)((matches_end_ptr - begin_matches) >> 3);
     for (size_t i = 0 ; i < 8 ; i++) {
-      next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + i * matches_stride;
-      matches_stop_ptr[i] = begin_matches + (i + 1) * matches_stride;
+      next_match_start_ptr[i] = matches_start_ptr[i] = begin_matches + (i * matches_stride);
+      matches_stop_ptr[i] = begin_matches + ((i + 1) * matches_stride);
       next_match_ptr[i] = next_match_start_ptr[i];
     }
   }
@@ -4177,8 +4285,9 @@ static void process_ranked_candidates(
       if (i < 7) {
         overlap_check_data[i].stop_matches_symbol_ptr = block_ptr;
         overlap_check_data[i].stop_symbol_ptr = block_ptr + MAX_MATCH_LENGTH;
-        if (overlap_check_data[i].stop_symbol_ptr > end_symbol_ptr)
+        if (overlap_check_data[i].stop_symbol_ptr > end_symbol_ptr) {
           overlap_check_data[i].stop_symbol_ptr = end_symbol_ptr;
+        }
       } else {
         overlap_check_data[7].stop_matches_symbol_ptr = end_symbol_ptr;
         overlap_check_data[7].stop_symbol_ptr = end_symbol_ptr;
@@ -4212,10 +4321,12 @@ static void process_ranked_candidates(
   if (stop_symbol_ptr - start_symbol_ptr + MAX_MATCH_LENGTH >= first_define_index) {
 main_overlap_check_loop_no_match:
     symbol = *in_symbol_ptr++;
-    if (in_symbol_ptr >= stop_symbol_ptr)
+    if (in_symbol_ptr >= stop_symbol_ptr) {
       goto main_overlap_check_loop_end;
-    if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+    }
+    if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0)) {
       goto main_overlap_check_loop_no_match;
+    }
     match_node_ptr = child_ptr_array[symbol];
 main_overlap_check_loop_match:
     symbol = *in_symbol_ptr++;
@@ -4227,8 +4338,9 @@ main_overlap_check_loop_match:
           shifted_symbol >>= 4;
         } else {
           if (match_node_ptr->miss_ptr == 0) {
-            if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0))
+            if (((int32_t)symbol < 0) || (symbol >= child_ptr_array_size) || (child_ptr_array[symbol] == 0)) {
               goto main_overlap_check_loop_no_match;
+            }
             match_node_ptr = child_ptr_array[symbol];
             goto main_overlap_check_loop_match;
           } else {
@@ -4259,10 +4371,11 @@ main_overlap_check_loop_match:
       if (num_prior_matches == 1) {
         if (prior_match_score_number[0] != node_score_number) {
           if (fast_mode == 0) {
-            if (prior_match_score_number[0] > node_score_number)
+            if (prior_match_score_number[0] > node_score_number) {
               candidate_bad[prior_match_score_number[0]] = 1;
-            else
+            } else {
               candidate_bad[node_score_number] = 1;
+            }
           } else {
             uint32_t low_score;
             uint32_t high_score;
@@ -4324,8 +4437,9 @@ main_overlap_check_loop_match:
               }
               int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
               while ((*next_overlap_num_ptr != -1)
-                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score)) {
                 next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+              }
               if ((*next_overlap_num_ptr == -1)
                   || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
                 if (num_overlaps < 150000) {
@@ -4352,8 +4466,9 @@ main_overlap_check_loop_match:
     }
     match_node_ptr = match_node_ptr->hit_ptr;
     if (match_node_ptr == 0) {
-      if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+      if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
         goto main_overlap_check_loop_no_match;
+      }
       match_node_ptr = child_ptr_array[symbol];
       goto main_overlap_check_loop_match;
     }
@@ -4362,10 +4477,12 @@ main_overlap_check_loop_match:
   } else {
 main_overlap_check_no_defs_loop_no_match:
     symbol = *in_symbol_ptr++;
-    if (in_symbol_ptr >= stop_symbol_ptr)
+    if (in_symbol_ptr >= stop_symbol_ptr) {
       goto main_overlap_check_loop_end;
-    if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0)
+    }
+    if ((int32_t)symbol < 0 || symbol >= child_ptr_array_size || child_ptr_array[symbol] == 0) {
       goto main_overlap_check_no_defs_loop_no_match;
+    }
     match_node_ptr = child_ptr_array[symbol];
 main_overlap_check_no_defs_loop_match:
     symbol = *in_symbol_ptr++;
@@ -4391,8 +4508,9 @@ main_overlap_check_no_defs_loop_match:
       } while (symbol != match_node_ptr->symbol);
     }
     if (match_node_ptr->child_ptr != 0) {
-      if (in_symbol_ptr > stop_symbol_ptr && in_symbol_ptr - match_node_ptr->num_symbols >= stop_symbol_ptr)
+      if (in_symbol_ptr > stop_symbol_ptr && in_symbol_ptr - match_node_ptr->num_symbols >= stop_symbol_ptr) {
         goto main_overlap_check_loop_end;
+      }
       match_node_ptr = match_node_ptr->child_ptr;
       goto main_overlap_check_no_defs_loop_match;
     }
@@ -4413,10 +4531,11 @@ main_overlap_check_no_defs_loop_match:
       if (num_prior_matches == 1) {
         if (prior_match_score_number[0] != node_score_number) {
           if (fast_mode == 0) {
-            if (prior_match_score_number[0] > node_score_number)
+            if (prior_match_score_number[0] > node_score_number) {
               candidate_bad[prior_match_score_number[0]] = 1;
-            else
+            } else {
               candidate_bad[node_score_number] = 1;
+            }
           } else {
             uint32_t low_score;
             uint32_t high_score;
@@ -4458,13 +4577,14 @@ main_overlap_check_no_defs_loop_match:
               prior_match_score_number[j] = prior_match_score_number[j + 1];
             }
           } else { // overlapping symbol substitution strings, so invalidate the lower score
-            if (prior_match_score_number[prior_match_number] == node_score_number)
+            if (prior_match_score_number[prior_match_number] == node_score_number) {
               found_same_score_prior_match = 1;
-            else if (fast_mode == 0) {
-              if (prior_match_score_number[prior_match_number] > node_score_number)
+            } else if (fast_mode == 0) {
+              if (prior_match_score_number[prior_match_number] > node_score_number) {
                 candidate_bad[prior_match_score_number[prior_match_number]] = 1;
-              else
+              } else {
                 candidate_bad[node_score_number] = 1;
+              }
             } else {
               uint32_t low_score;
               uint32_t high_score;
@@ -4477,16 +4597,18 @@ main_overlap_check_no_defs_loop_match:
               }
               int32_t * next_overlap_num_ptr = &overlap_check_data[0].next[low_score];
               while ((*next_overlap_num_ptr != -1)
-                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score))
+                  && (overlap_check_data[0].second[*next_overlap_num_ptr] < high_score)) {
                 next_overlap_num_ptr = &overlap_check_data[0].next[*next_overlap_num_ptr];
+              }
               if ((*next_overlap_num_ptr == -1)
                   || (overlap_check_data[0].second[*next_overlap_num_ptr] != high_score)) {
                 if (num_overlaps < 150000) {
                   overlap_check_data[0].second[num_overlaps] = high_score;
                   overlap_check_data[0].next[num_overlaps] = *next_overlap_num_ptr;
                   *next_overlap_num_ptr = num_overlaps++;
-                } else
+                } else {
                   candidate_bad[high_score] = 1;
+                }
               }
             }
             prior_match_number++;
@@ -4566,8 +4688,9 @@ main_overlap_check_loop_end:
         if ((int32_t)start_index > prior_match_end) {
           prior_match_end = start_index + candidates[candidate_num].num_symbols - 1;
           uint32_t *start_ptr = start_symbol_ptr + start_index;
-          while (in_symbol_ptr < start_ptr)
+          while (in_symbol_ptr < start_ptr) {
             *out_symbol_ptr++ = *in_symbol_ptr++;
+          }
           *out_symbol_ptr++ = new_rule_number[candidate_num];
           symbol_counts[new_rule_number[candidate_num]]++;
           in_symbol_ptr += candidates[candidate_num].num_symbols;
@@ -4639,11 +4762,12 @@ main_overlap_check_loop_end:
             }
             prior_min_score = min_score;
           } else {
-            new_min_score = 0.5 * (prior_min_score + min_score) - 0.1;
-            if (new_min_score >= prior_min_score)
+            new_min_score = (0.5 * (prior_min_score + min_score)) - 0.1;
+            if (new_min_score >= prior_min_score) {
               new_min_score = prior_min_score - 0.05;
-            if (new_min_score < min_score)
+            } else if (new_min_score < min_score) {
               new_min_score = min_score - 0.09;
+            }
             prior_min_score = candidates[candidates_index[num_candidates - 1]].score;
           }
           min_score = new_min_score;
@@ -4680,13 +4804,14 @@ main_overlap_check_loop_end:
           if (scan_cycle > 50) {
             if (scan_cycle > 100) {
               new_min_score = max_scores == MAX_SCORES_FAST
-                            ? 0.995 * min_score * (min_score / prior_min_score) - 0.002
-                            : 0.998 * min_score * (min_score / prior_min_score) - 0.002;
+                            ? (0.995 * min_score * (min_score / prior_min_score)) - 0.002
+                            : (0.998 * min_score * (min_score / prior_min_score)) - 0.002;
             } else {
-              new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.002;
+              new_min_score = (0.99 * min_score * (min_score / prior_min_score)) - 0.002;
             }
-          } else
-            new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.002;
+          } else {
+            new_min_score = (0.98 * min_score * (min_score / prior_min_score)) - 0.002;
+          }
           prior_min_score = min_score;
           min_score = new_min_score;
         } else {
@@ -4694,25 +4819,27 @@ main_overlap_check_loop_end:
           min_score *= 0.5;
         }
       } else {
-        min_score = 0.95 * prior_min_score - 0.002;
+        min_score = (0.95 * prior_min_score) - 0.002;
       }
     } else if (min_score < prior_min_score) {
       if (prior_min_score != BIG_FLOAT) {
-        new_min_score = 0.95 * min_score * (min_score / prior_min_score) - 0.002;
+        new_min_score = (0.95 * min_score * (min_score / prior_min_score)) - 0.002;
         prior_min_score = min_score;
         min_score = new_min_score;
       } else {
         prior_min_score = min_score;
         min_score *= 0.5;
       }
-    } else
-      min_score = 0.95 * prior_min_score - 0.002;
+    } else {
+      min_score = (0.95 * prior_min_score) - 0.002;
+    }
     if (min_score > 0.9 * section_scores[fast_section]) {
       min_score = (0.9 * section_scores[fast_section] < fast_min_score) && (min_score >= fast_min_score)
                 ? fast_min_score
                 : 0.9 * section_scores[fast_section];
-    } else if (min_score < 0.0)
+    } else if (min_score < 0.0) {
       min_score = 0.0;
+    }
   } else {
     scan_mode = GLZA_SCAN_RETRY;
   }
@@ -5060,8 +5187,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   uint8_t create_words;      /* if 0, word pass skipped (initial_scan_mode = GLZA_SCAN_RUN_DEDUP) */
   {
     if (params != 0) {
-      if (params->user_set_profit_ratio_power != 0)
+      if (params->user_set_profit_ratio_power != 0) {
         profit_ratio_power = params->profit_ratio_power;
+      }
       create_words = params->create_words;
       fast_mode = in_size < 1000 ? 0 : params->fast_mode;
       order_ratio = params->order;
@@ -5076,10 +5204,12 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   {
     // max_rules = min(0xA00000, (in_size >> 4) + 0x110000);
     max_rules = 0xA00000;
-    if (max_rules > (in_size >> 4) + 0x110000)
+    if (max_rules > (in_size >> 4) + 0x110000) {
       max_rules = (in_size >> 4) + 0x110000;
-    if (params != 0 && params->max_rules + 0x110000 < max_rules)
+    }
+    if (params != 0 && params->max_rules + 0x110000 < max_rules) {
       max_rules = params->max_rules + 0x110000;
+    }
   }
 
   struct rank_scores_thread_data *rank_scores_data_ptr;
@@ -5100,27 +5230,31 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   uint64_t available_RAM; /* bytes malloc'd for start_symbol_ptr arena; user-set or heuristic from in_size */
   if (params != 0 && params->user_set_RAM_size != 0) {
     available_RAM = (uint64_t)(params->RAM_usage * (float)0x100000);
-    if (available_RAM > max_memory_usage)
+    if (available_RAM > max_memory_usage) {
       available_RAM = max_memory_usage;
+    }
     if (0 == (start_symbol_ptr = (uint32_t *)malloc(available_RAM))) {
       fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n", (size_t)available_RAM);
       return 0;
     }
     if (available_RAM < (41 * (uint64_t)in_size) / 10) {
       fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
-          (float)((41 * (uint64_t)in_size) / 10) / (float)0x100000 + 0.005);
+          ((float)((41 * (uint64_t)in_size) / 10) / (float)0x100000) + 0.005);
       return 0;
     }
   } else {
-    available_RAM = (uint64_t)in_size * 250 + 40000000;
-    if (available_RAM > max_memory_usage)
+    available_RAM = ((uint64_t)in_size * 250) + 40000000;
+    if (available_RAM > max_memory_usage) {
       available_RAM = max_memory_usage;
-    if (available_RAM > 0x80000000 + 6 * (uint64_t)in_size)
-      available_RAM = 0x80000000 + 6 * (uint64_t)in_size;
+    }
+    if (available_RAM > 0x80000000 + (6 * (uint64_t)in_size)) {
+      available_RAM = 0x80000000 + (6 * (uint64_t)in_size);
+    }
     do {
       start_symbol_ptr = (uint32_t *)malloc(available_RAM);
-      if (start_symbol_ptr != 0)
+      if (start_symbol_ptr != 0) {
         break;
+      }
       available_RAM = (available_RAM / 10) * 9;
     } while (available_RAM > 1500000000);
     if ((start_symbol_ptr == 0) || (available_RAM < (uint64_t)in_size * 9 / 2)) {
@@ -5145,26 +5279,33 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   if (format < 2) {
     do {
       uint8_t this_char = *in_char_ptr++;
-      if (this_char < 0x80)
+      if (this_char < 0x80) {
         *in_symbol_ptr++ = (uint32_t)this_char;
-      else if ((this_char < 0xC0) || (this_char >= 0xF2) || ((*in_char_ptr & 0xC0) != 0x80)) break;
-      else {
-        UTF8_value = 0x40 * (uint32_t)(this_char & 0x1F) + (*in_char_ptr++ & 0x3F);
+      } else if ((this_char < 0xC0) || (this_char >= 0xF2) || ((*in_char_ptr & 0xC0) != 0x80)) {
+        break;
+      } else {
+        UTF8_value = (0x40 * (uint32_t)(this_char & 0x1F)) + (*in_char_ptr++ & 0x3F);
         if (this_char >= 0xE0) {
-          if ((*in_char_ptr & 0xC0) != 0x80) break;
-          UTF8_value = 0x40 * UTF8_value + (uint32_t)(*in_char_ptr++ & 0x3F);
+          if ((*in_char_ptr & 0xC0) != 0x80) {
+            break;
+          }
+          UTF8_value = (0x40 * UTF8_value) + (uint32_t)(*in_char_ptr++ & 0x3F);
           if (this_char >= 0xF0) {
-            if ((*in_char_ptr & 0xC0) != 0x80) break;
-            UTF8_value = 0x40 * (UTF8_value & 0x7FFF) + (uint32_t)(*in_char_ptr++ & 0x3F);
+            if ((*in_char_ptr & 0xC0) != 0x80) {
+              break;
+            }
+            UTF8_value = (0x40 * (UTF8_value & 0x7FFF)) + (uint32_t)(*in_char_ptr++ & 0x3F);
           }
         }
         *in_symbol_ptr++ = UTF8_value;
-        if (UTF8_value > max_UTF8_value)
+        if (UTF8_value > max_UTF8_value) {
           max_UTF8_value = UTF8_value;
+        }
       }
     } while (in_char_ptr < end_char_ptr);
-    if (in_char_ptr == end_char_ptr)
+    if (in_char_ptr == end_char_ptr) {
       UTF8_compliant = 1;
+    }
   }
 
 #ifdef PRINTON
@@ -5181,8 +5322,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     num_file_symbols = in_symbol_ptr - start_symbol_ptr;
     end_symbol_ptr = in_symbol_ptr;
     in_symbol_ptr = start_symbol_ptr;
-    while (in_symbol_ptr != end_symbol_ptr)
+    while (in_symbol_ptr != end_symbol_ptr) {
       symbol_counts[*in_symbol_ptr++]++;
+    }
 #ifdef PRINTON
     fprintf(stderr, "%u symbols, maximum UTF-8 value 0x%x\n",
         (unsigned int)num_file_symbols, (unsigned int)max_UTF8_value);
@@ -5190,8 +5332,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     if (params == 0 || params->user_set_profit_ratio_power == 0) {
       profit_ratio_power = fast_mode == 1 ? 1.0 : 2.0;
     }
-    for (size_t i = 0 ; i < num_terminals ; i++)
+    for (size_t i = 0 ; i < num_terminals ; i++) {
       symbol_ends[i].start = symbol_ends[i].end = get_UTF8_context(i);
+    }
   } else {
     num_terminals = 0x100;
     max_terminal = 0xFF;
@@ -5207,21 +5350,23 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     fprintf(stderr, "%u symbols\n", (unsigned int)num_file_symbols);
 #endif
     if (params == 0 || params->user_set_profit_ratio_power == 0) {
-      if (fast_mode == 0 && cap_encoded != 0)
+      if (fast_mode == 0 && cap_encoded != 0) {
         profit_ratio_power = 2.0;
-      else if ((format & 0xFE) == 0)
+      } else if ((format & 0xFE) == 0) {
         profit_ratio_power = 1.0;
-      else
+      } else {
         profit_ratio_power = 0.0;
+      }
     }
-    for (size_t i = 0 ; i < num_terminals ; i++)
+    for (size_t i = 0 ; i < num_terminals ; i++) {
       symbol_ends[i].start = symbol_ends[i].end = i;
+    }
   }
   free(*iobuf);
   if (available_RAM
-      < 4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST) {
+      < (4 * (uint64_t)in_size) + (4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals) + (0x10 * MAX_SCORES_FAST)) {
     fprintf(stderr, "ERROR - Insufficient RAM to compress - unable to allocate %zu bytes\n",
-        (size_t)(4 * (uint64_t)in_size + 4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals + 0x10 * MAX_SCORES_FAST));
+        (size_t)((4 * (uint64_t)in_size) + (4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals) + (0x10 * MAX_SCORES_FAST)));
     return 0;
   }
   if (params != 0 && params->max_rules + num_terminals < max_rules) {
@@ -5240,19 +5385,22 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
 
   uint32_t max_x_log2_x = 0; /* tracks x_log2_x[] allocation length; derived from num_ends[], capped at NUM_PRECALCULATED_X_LOG2_X */
-  for (size_t i = 0 ; i < 0x100 ; i++)
-    if (num_ends[i] > max_x_log2_x)
+  for (size_t i = 0 ; i < 0x100 ; i++) {
+    if (num_ends[i] > max_x_log2_x) {
       max_x_log2_x = num_ends[i];
+    }
+  }
   max_x_log2_x += 2;
-  if (max_x_log2_x > NUM_PRECALCULATED_X_LOG2_X)
+  if (max_x_log2_x > NUM_PRECALCULATED_X_LOG2_X) {
     max_x_log2_x = NUM_PRECALCULATED_X_LOG2_X;
+  }
 
   uint32_t first_define_index = in_symbol_ptr - start_symbol_ptr; /* stream index of first 0x80000001 rule marker */
   *end_symbol_ptr = 0xFFFFFFFE;
-  size_t min_RAM = end_symbol_ptr - start_symbol_ptr + 2 * MAX_MATCH_LENGTH * sizeof(struct node);
+  size_t min_RAM = end_symbol_ptr - start_symbol_ptr + (2 * MAX_MATCH_LENGTH * sizeof(struct node));
   if (min_RAM > available_RAM) {
     fprintf(stderr, "ERROR - Insufficient RAM to compress - program requires at least %.2lf MB\n",
-        (float)min_RAM / (float)0x100000 + 0.005);
+        ((float)min_RAM / (float)0x100000) + 0.005);
     return 0;
   }
 
@@ -5270,11 +5418,14 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
 
   uint32_t num_terminals_used = 0;
-  for (size_t i = 0 ; i < num_terminals ; i++)
-    if (symbol_counts[i] != 0)
+  for (size_t i = 0 ; i < num_terminals ; i++) {
+    if (symbol_counts[i] != 0) {
       num_terminals_used++;
-  for (size_t i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++)
+    }
+  }
+  for (size_t i = 1 ; i < NUM_PRECALCULATED_LOG2_X ; i++) {
     log2_x[i] = log2((double)i);
+  }
   rank_scores_data_ptr->candidates_index = candidates_index;
 
   uint32_t initial_max_scores;  /* starting max_scores passed to main_loop; formula differs by fast_mode */
@@ -5285,9 +5436,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   uint8_t section_repeats;      /* fast_mode==1 only: stick with prior section up to 2 passes; __jm__ only initialized when fast_mode==1 */
   float section_scores[23];     /* fast_mode==1 only: best tail score seen per section; size matches initial fast_sections */
   if (fast_mode == 0) {
-    for (size_t i = 1 ; i < max_x_log2_x ; i++)
+    for (size_t i = 1 ; i < max_x_log2_x ; i++) {
       x_log2_x[i] = (double)i * log2((double)i);
-    initial_max_scores = (uint32_t)(500.0 + 0.075 * sqrt((double)num_file_symbols));
+    }
+    initial_max_scores = (uint32_t)(500.0 + (0.075 * sqrt((double)num_file_symbols)));
     fast_sections = 1;
   } else {
     if (0 == (candidates_position = (uint16_t *)malloc(2 * max_scores))) {
@@ -5299,9 +5451,10 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     fast_section = 0;
     fast_min_score = 4.0;
     section_repeats = 0;
-    for (size_t i = 0 ; i < 23 ; i++)
+    for (size_t i = 0 ; i < 23 ; i++) {
       section_scores[i] = BIG_FLOAT;
-    initial_max_scores = (uint32_t)(100.0 + 22.0 * pow((double)num_file_symbols, 0.3333));
+    }
+    initial_max_scores = (uint32_t)(100.0 + (22.0 * pow((double)num_file_symbols, 0.3333)));
   }
   memset(candidate_bad, 0, max_scores);
   min_score = 10.0;
@@ -5345,8 +5498,9 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     free(score_map);
     free(candidates_position);
   }
-  else
+  else {
     free(x_log2_x);
+  }
   free(symbol_counts);
   free(symbol_ends);
   free(rank_scores_data_ptr);
@@ -5363,13 +5517,15 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   if (UTF8_compliant != 0) {
     *in_char_ptr++ = 5 | (cap_encoded << 1);
     uint8_t base_bits = 7;
-    while ((max_UTF8_value >> base_bits) != 0)
+    while ((max_UTF8_value >> base_bits) != 0) {
       base_bits++;
+    }
     *in_char_ptr++ = base_bits;
-  } else if (cap_encoded != 0)
+  } else if (cap_encoded != 0) {
     *in_char_ptr++ = 3;
-  else
+  } else {
     *in_char_ptr++ = format;
+  }
   in_symbol_ptr = start_symbol_ptr;
   uint32_t next_new_symbol_number = num_terminals + num_rules;
   {
@@ -5377,48 +5533,53 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
     uint32_t invalid_count = 0;
     while (validate_ptr < end_symbol_ptr) {
       uint32_t symbol_value = *validate_ptr++;
-      if (symbol_value == 0xFFFFFFFE)
+      if (symbol_value == 0xFFFFFFFE) {
         continue;
+      }
       if ((int32_t)symbol_value >= 0) {
         if (symbol_value >= next_new_symbol_number) {
-          if (invalid_count < 8)
+          if (invalid_count < 8) {
             fprintf(stderr,
                 "GLZA compress: invalid terminal symbol %u >= next_new_symbol_number %u at stream index %u (pass %u rules %u)\n",
                 (unsigned int)symbol_value, (unsigned int)next_new_symbol_number,
                 (unsigned int)(validate_ptr - 1 - start_symbol_ptr), (unsigned int)scan_cycle,
                 (unsigned int)num_rules);
+          }
           invalid_count++;
         }
       } else {
         uint32_t rule_num = symbol_value - 0x80000001;
         if (rule_num >= num_rules) {
-          if (invalid_count < 8)
+          if (invalid_count < 8) {
             fprintf(stderr,
                 "GLZA compress: invalid production marker 0x%08x (rule %u >= num_rules %u) at stream index %u\n",
                 (unsigned int)symbol_value, (unsigned int)rule_num, (unsigned int)num_rules,
                 (unsigned int)(validate_ptr - 1 - start_symbol_ptr));
+          }
           invalid_count++;
         }
       }
     }
-    if (invalid_count > 8)
+    if (invalid_count > 8) {
       fprintf(stderr, "GLZA compress: %u additional invalid symbols in grammar stream\n",
           (unsigned int)(invalid_count - 8));
-    if (invalid_count != 0)
+    }
+    if (invalid_count != 0) {
       fprintf(stderr,
           "GLZA compress: %u invalid symbols in final stream (num_terminals=%u num_rules=%u next_new_symbol_number=%u)\n",
           (unsigned int)invalid_count, (unsigned int)num_terminals, (unsigned int)num_rules,
           (unsigned int)next_new_symbol_number);
+    }
   }
   if (UTF8_compliant != 0) {
     while (in_symbol_ptr != end_symbol_ptr) {
       uint32_t symbol_value = *in_symbol_ptr++;
-      if (symbol_value < 0x80)
+      if (symbol_value < 0x80) {
         *in_char_ptr++ = (uint8_t)symbol_value;
-      else if (symbol_value < num_terminals) {
-        if (symbol_value < 0x800)
+      } else if (symbol_value < num_terminals) {
+        if (symbol_value < 0x800) {
           *in_char_ptr++ = 0xC0 + (symbol_value >> 6);
-        else if (symbol_value < 0x10000) {
+        } else if (symbol_value < 0x10000) {
           *in_char_ptr++ = 0xE0 + (symbol_value >> 12);
           *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
         } else {
@@ -5445,14 +5606,16 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
       uint32_t symbol_value = *in_symbol_ptr++;
       if (symbol_value <= DEFINE_SYMBOL_CHAR) {
         *in_char_ptr++ = (uint8_t)symbol_value;
-        if (symbol_value >= INSERT_SYMBOL_CHAR)
+        if (symbol_value >= INSERT_SYMBOL_CHAR) {
           *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+        }
       } else {
         if ((int32_t)symbol_value >= 0) {
           symbol_value -= 0x100;
           *in_char_ptr++ = INSERT_SYMBOL_CHAR;
-        } else
+        } else {
           *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+        }
         *in_char_ptr++ = (uint8_t)((symbol_value >> 16) & 0xFF);
         *in_char_ptr++ = (uint8_t)((symbol_value >> 8) & 0xFF);
         *in_char_ptr++ = (uint8_t)(symbol_value & 0xFF);
@@ -5467,10 +5630,11 @@ uint8_t GLZAcompress(size_t in_size, size_t * outsize_ptr, uint8_t ** iobuf, str
   }
   *outsize_ptr = in_size;
   free(start_symbol_ptr);
+  if (fast_mode != 0) {
 #ifdef PRINTON
-  if (fast_mode != 0)
     fprintf(stderr, "PASS %u: grammar size %u, %u production rules  \n",
         (unsigned int)scan_cycle, (unsigned int)num_file_symbols + 1, (unsigned int)num_rules);
 #endif
+  }
   return 1;
 }
