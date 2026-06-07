@@ -38,6 +38,48 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 
+#define GLZA_DIE(msg)                                                          \
+  do {                                                                         \
+    fputs(msg, stderr);                                                        \
+    exit(1);                                                                   \
+  } while (0)
+
+static uint8_t glza_warned_suffix_nodes;
+static uint8_t glza_warned_match_nodes;
+static uint8_t glza_warned_main_nodes;
+static uint8_t glza_warned_rank_buffer;
+
+static void glza_warn_once(uint8_t *flag, const char *message) {
+  if (*flag == 0) {
+    *flag = 1;
+    fputs(message, stderr);
+  }
+}
+
+static void glza_warn_suffix_nodes_limit(void) {
+  glza_warn_once(&glza_warned_suffix_nodes,
+                 "GLZA compress: suffix tree node limit reached "
+                 "(increase RAM or reduce input)\n");
+}
+
+static void glza_warn_match_nodes_limit(void) {
+  glza_warn_once(&glza_warned_match_nodes,
+                 "GLZA compress: match prefix-tree node limit reached "
+                 "(increase RAM or reduce candidates)\n");
+}
+
+static void glza_warn_main_nodes_limit(void) {
+  glza_warn_once(&glza_warned_main_nodes,
+                 "GLZA compress: suffix tree build stopped at node budget "
+                 "(increase RAM)\n");
+}
+
+static void glza_warn_rank_buffer_limit(void) {
+  glza_warn_once(&glza_warned_rank_buffer,
+                 "GLZA compress: rank-scores buffer full (candidate cap "
+                 "reached)\n");
+}
+
 const uint32_t MAX_WRITE_SIZE = 0x200000;
 const uint32_t MAX_PRIOR_MATCHES = 20;
 const uint32_t MAX_MATCH_LENGTH = 8000;
@@ -76,9 +118,13 @@ static uint32_t num_ends[0x100];   /* order-1: count of symbols ending with each
                                       context byte */
 static uint32_t o1c[0x100][0x100]; /* order-1 co-occurrence counts
                                       [end_context][start_context] */
-static int32_t *base_nodes_child_node_num; /* suffix-tree child index table;
-                                              rows sized child_ptr_array_size *
-                                              BASE_NODES_CHILD_ARRAY_SIZE */
+
+// suffix-tree child index table;
+// rows sized child_ptr_array_size * BASE_NODES_CHILD_ARRAY_SIZE
+// base_nodes_child_node_num[g] == 0 -> no symbols in group g encountered yet, no node from root
+// base_nodes_child_node_num[g] <  0 -> exactly one symbol in group g encountered, offset stored as negative
+// base_nodes_child_node_num[g] >  0 -> value should be < `nodes_num_limit` and index `nodes`
+static int32_t *base_nodes_child_node_num; 
 static int16_t *score_map; /* fast_mode==1 only: maps file offsets to candidate
                               ranks (2*in_size bytes) */
 static uint8_t
@@ -116,6 +162,9 @@ static float min_score; /* current candidate score threshold; adaptive each pass
 struct node {
   uint32_t symbol;
   uint32_t last_match_index;
+  // indexes into `nodes` for the sibling nodes.
+  // induces a binary tree over symbols that map to the same base_nodes_child_node_num position.
+  // "sibling" nodes are lateral, meaning they are at the same level in the GST
   int32_t sibling_node_num[2];
   int32_t child_node_num;
   uint32_t num_extra_symbols;
@@ -430,7 +479,10 @@ static void write_siblings_miss_ptr(struct match_node *match_nodes,
 static struct node *create_suffix_node(uint32_t suffix_symbol,
                                        uint32_t symbol_index,
                                        uint32_t *next_node_num_ptr) {
+  // __jm__ does this create a node for `suffix_symbol` connected to the
+  // "implicit" root of the GST?
   if (*next_node_num_ptr >= nodes_num_limit) {
+    glza_warn_suffix_nodes_limit();
     return NULL;
   }
   struct node *node_ptr = &nodes[(*next_node_num_ptr)++];
@@ -449,6 +501,7 @@ static struct node *split_node_for_overlap(struct node *node_ptr,
                                            uint32_t in_symbol_index,
                                            uint32_t *next_node_num_ptr) {
   if (*next_node_num_ptr >= nodes_num_limit) {
+    glza_warn_suffix_nodes_limit();
     return NULL;
   }
   uint32_t non_overlap_length = split_index - node_ptr->last_match_index;
@@ -470,67 +523,85 @@ static struct node *split_node_for_overlap(struct node *node_ptr,
 
 static void add_word_suffix(uint32_t *in_symbol_ptr,
                             uint32_t *next_node_num_ptr) {
-  int32_t *base_node_child_num_ptr;
-  if (in_symbol_ptr >= end_symbol_ptr) {
-    return;
-  }
-  uint32_t stream_len = (uint32_t)(end_symbol_ptr - start_symbol_ptr);
-  if ((uint32_t)(in_symbol_ptr - start_symbol_ptr) >= stream_len) {
-    return;
-  }
+  assert(in_symbol_ptr < end_symbol_ptr &&
+         "bad arg: `in_symbol_ptr` cursor past EOS");
+  ptrdiff_t stream_len = end_symbol_ptr - start_symbol_ptr;
   uint32_t search_symbol = *in_symbol_ptr;
   if ((int32_t)search_symbol < 0) {
     return;
   }
-  // __jm__ wtf happens here
-  base_node_child_num_ptr =
+  // 
+  int32_t *base_node_child_num_ptr =
       search_symbol < 0x80
           ? &base_nodes_child_node_num[search_symbol]
+          // higher bytes are aggregated into 16 buckets, the last 4 bits serving as the index
+          // e.g. 0x81 and 0x91 will be mapped into the same bucket
           : &base_nodes_child_node_num[0x80 + (search_symbol & 0xF)];
-  if (*base_node_child_num_ptr <= 0) {
-    if (*base_node_child_num_ptr ==
-        0) { // first occurence of the symbol, so create a child
-      *base_node_child_num_ptr = in_symbol_ptr - start_symbol_ptr - 0x80000000;
-      return;
-    }
-    uint32_t symbol_index = *base_node_child_num_ptr + 0x80000000;
-    if (symbol_index >= stream_len) {
-      return;
-    }
-    uint32_t new_node_num = *next_node_num_ptr;
-    if (create_suffix_node(*(start_symbol_ptr + symbol_index), symbol_index,
-                           next_node_num_ptr) == 0) {
-      return;
-    }
-    *base_node_child_num_ptr = (int32_t)new_node_num;
+
+  if (*base_node_child_num_ptr == 0) {
+    // Record WHERE in the stream this word started, but don't allocate a node yet.
+    // Negative value = -(index XOR 0x80000000) effectively stores stream offset.
+    *base_node_child_num_ptr = in_symbol_ptr - start_symbol_ptr - 0x80000000;
+    return;
   }
-  if (*base_node_child_num_ptr <= 0 ||
-      (uint32_t)*base_node_child_num_ptr >= nodes_num_limit) {
+
+  if (*base_node_child_num_ptr < 0) {
+    // decoding: in_symbol_ptr - start_symbol_ptr = index in the input stream
+    uint32_t symbol_index = *base_node_child_num_ptr + 0x80000000;
+    assert(symbol_index < stream_len &&
+           "decoded GST index must be valid offset into input stream");
+    if (create_suffix_node(start_symbol_ptr[symbol_index], symbol_index,
+                           next_node_num_ptr) == NULL) {
+      return;
+    }
+    *base_node_child_num_ptr = (int32_t)(*next_node_num_ptr - 1);
+  }
+
+  if (*base_node_child_num_ptr <= 0) {
+    assert(0 && "GST base child index invalid after expansion");
+    return;
+  }
+  if ((uint32_t)*base_node_child_num_ptr >= nodes_num_limit) {
+    assert(0 && "GST base child index out of range");
     return;
   }
   struct node *node_ptr = &nodes[*base_node_child_num_ptr];
-  if (search_symbol != node_ptr->symbol) { // follow siblings until match found
-                                           // or end of siblings found
+  if (search_symbol != node_ptr->symbol) { 
+    // condition is true for "bucketed" high-byte `search_symbol` values.
+    // we drop the low 4 bits since they are identical for `search_symbol` and `node_ptr->symbol`
+    //
+    // follow siblings until match found or end of siblings found 
     uint32_t shifted_search_symbol = search_symbol >> 4;
+    // node_ptr->sibling_node_num induces a binary tree of _lateral_ nodes.
+    // they can all be considered immediate children of the GST root.
+    // _lateral_ nodes are created in order, so for two symbols sharing low bits,
+    // you will go through the one inserted previously into the GST to create the node of the second one
+    //
+    // The routing scheme is safe as long as the nodes don't overflow the global GST size limit.
+    // Though it could potentially start creating degenerate linear paths after the first 28 bits
+    // are traversed and already occupied.
+    // __jm__ TODO: check how many symbols per bucket there can be and whether that affects it.
     do {
       int32_t *sibling_node_num_ptr =
           &node_ptr->sibling_node_num[shifted_search_symbol & 1];
       if (*sibling_node_num_ptr == 0) { // no match so add sibling
         if (create_suffix_node(search_symbol, in_symbol_ptr - start_symbol_ptr,
-                               next_node_num_ptr) == 0) {
+                               next_node_num_ptr) == NULL) {
           return;
         }
         *sibling_node_num_ptr = (int32_t)(*next_node_num_ptr - 1);
         return;
       }
       if ((uint32_t)*sibling_node_num_ptr >= nodes_num_limit) {
+        assert(0 && "GST sibling node index out of range");
         return;
       }
       node_ptr = &nodes[*sibling_node_num_ptr];
-      shifted_search_symbol = shifted_search_symbol >> 1;
+      shifted_search_symbol >>= 1;
     } while (search_symbol != node_ptr->symbol);
   }
 
+  // __jm__ giving up here
   // found a matching sibling
   uint32_t *first_symbol_ptr = in_symbol_ptr - 1;
   uint32_t *max_word_ptr = end_symbol_ptr - 1;
@@ -541,7 +612,9 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
     // matching sibling with child so check length of match
     uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
     if (num_extra_symbols != 0) {
-      if (node_ptr->last_match_index + num_extra_symbols + 1 >= stream_len) {
+      if (node_ptr->last_match_index + num_extra_symbols + 1 >=
+          (uint32_t)stream_len) {
+        assert(0 && "GST node span exceeds grammar stream");
         return;
       }
       uint32_t *node_symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
@@ -550,12 +623,14 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
         if (in_symbol_ptr + length > max_word_ptr) {
           return;
         }
-        if (node_ptr->last_match_index + length >= stream_len) {
+        if (node_ptr->last_match_index + length >= (uint32_t)stream_len) {
+          assert(0 && "GST node span exceeds grammar stream");
           return;
         }
         if (*(node_symbol_ptr + length) !=
             *(in_symbol_ptr + length)) { // insert node in branch
           if (*next_node_num_ptr + 1 >= nodes_num_limit) {
+            glza_warn_suffix_nodes_limit();
             return;
           }
           struct node *new_node_ptr = &nodes[*next_node_num_ptr];
@@ -586,6 +661,7 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
     }
     search_symbol = *in_symbol_ptr;
     if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit) {
+      assert(0 && "GST child node index out of range");
       return;
     }
     node_ptr = &nodes[node_ptr->child_node_num];
@@ -598,13 +674,14 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
         if (*prior_node_num_ptr == 0) {
           if (create_suffix_node(search_symbol,
                                  in_symbol_ptr - start_symbol_ptr,
-                                 next_node_num_ptr) == 0) {
+                                 next_node_num_ptr) == NULL) {
             return;
           }
           *prior_node_num_ptr = (int32_t)(*next_node_num_ptr - 1);
           return;
         }
         if ((uint32_t)*prior_node_num_ptr >= nodes_num_limit) {
+          assert(0 && "GST sibling node index out of range");
           return;
         }
         node_ptr = &nodes[*prior_node_num_ptr];
@@ -617,7 +694,8 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
   // instance, add child sibling
   node_ptr->instances = 2;
   node_ptr->child_node_num = *next_node_num_ptr;
-  if (node_ptr->last_match_index + 2 >= stream_len) {
+  if (node_ptr->last_match_index + 2 >= (uint32_t)stream_len) {
+    assert(0 && "GST node span exceeds grammar stream");
     return;
   }
   uint32_t *node_symbol_ptr = start_symbol_ptr + node_ptr->last_match_index;
@@ -633,14 +711,15 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
            (*(in_symbol_ptr + length - 1) != 0x20)) {
       length++;
     }
-    if (node_ptr->last_match_index + length >= stream_len) {
+    if (node_ptr->last_match_index + length >= (uint32_t)stream_len) {
+      assert(0 && "GST node span exceeds grammar stream");
       return;
     }
     node_ptr->num_extra_symbols = length - 1;
     node_ptr = create_suffix_node(*(node_symbol_ptr + length),
                                   node_symbol_ptr + length - start_symbol_ptr,
                                   next_node_num_ptr);
-    if (node_ptr == 0) {
+    if (node_ptr == NULL) {
       return;
     }
     node_ptr->sibling_node_num[*(in_symbol_ptr + length) & 1] =
@@ -653,7 +732,7 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
   node_ptr = create_suffix_node(*(node_symbol_ptr + 1),
                                 node_symbol_ptr + 1 - start_symbol_ptr,
                                 next_node_num_ptr);
-  if (node_ptr == 0) {
+  if (node_ptr == NULL) {
     return;
   }
   node_ptr->sibling_node_num[*(in_symbol_ptr + 1) & 1] = *next_node_num_ptr;
@@ -678,6 +757,8 @@ static void add_suffix(uint32_t first_symbol, const uint32_t *in_symbol_ptr,
   }
   if (*base_node_child_num_ptr < 0) {
     uint32_t symbol_index = *base_node_child_num_ptr + 0x80000000;
+    assert(symbol_index < (uint32_t)(end_symbol_ptr - start_symbol_ptr) &&
+           "decoded GST index must be valid offset into input stream");
     uint32_t symbol = *(start_symbol_ptr + symbol_index);
     *base_node_child_num_ptr = *next_node_num_ptr;
     node_ptr = create_suffix_node(symbol, symbol_index, next_node_num_ptr);
@@ -725,19 +806,21 @@ static void add_suffix(uint32_t first_symbol, const uint32_t *in_symbol_ptr,
   }
 
   node_ptr = &nodes[*base_node_child_num_ptr];
-  if (search_symbol != node_ptr->symbol) { // follow siblings until match found
-                                           // or end of siblings found
+  if (search_symbol != node_ptr->symbol) { 
+    // follow siblings until match found or end of siblings found
     uint32_t shifted_search_symbol = search_symbol >> 4;
     do {
       int32_t *sibling_node_num_ptr =
           &node_ptr->sibling_node_num[shifted_search_symbol & 1];
-      if (*sibling_node_num_ptr <= 0) {
-        if (*sibling_node_num_ptr == 0) { // no sibling so add sibling
-          *sibling_node_num_ptr = node_start_index - 0x80000000;
-          return;
-        }
+      if (*sibling_node_num_ptr == 0) { // no sibling so add sibling
+        *sibling_node_num_ptr = node_start_index - 0x80000000;
+        return;
+      }
+      if (*sibling_node_num_ptr < 0) {
         // turn the sibling into a node
         uint32_t symbol_index = *sibling_node_num_ptr + 0x80000000;
+        assert(symbol_index < (uint32_t)(end_symbol_ptr - start_symbol_ptr) &&
+               "decoded GST index must be valid offset into input stream");
         *sibling_node_num_ptr = *next_node_num_ptr;
         node_ptr = create_suffix_node(*(start_symbol_ptr + symbol_index),
                                       symbol_index, next_node_num_ptr);
@@ -847,6 +930,8 @@ static void add_suffix(uint32_t first_symbol, const uint32_t *in_symbol_ptr,
         }
         if (*prior_node_num_ptr < 0) { // turn the sibling into a node
           uint32_t symbol_index = *prior_node_num_ptr + 0x80000000;
+          assert(symbol_index < (uint32_t)(end_symbol_ptr - start_symbol_ptr) &&
+                 "decoded GST index must be valid offset into input stream");
           *prior_node_num_ptr = *next_node_num_ptr;
           node_ptr = create_suffix_node(*(start_symbol_ptr + symbol_index),
                                         symbol_index, next_node_num_ptr);
@@ -929,6 +1014,7 @@ static void *build_tree_thread(void *arg) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
           pthread_mutex_unlock(&suffix_tree_mutex);
           if (next_node_num >= node_num_limit) {
+            glza_warn_main_nodes_limit();
             return 0;
           }
         }
@@ -962,6 +1048,7 @@ static void *word_build_tree_thread(void *arg) {
               thread_data_ptr->start_positions[local_read_index & 0xFF],
           &next_node_num);
       if (next_node_num >= nodes_limit) {
+        glza_warn_main_nodes_limit();
         return 0;
       }
       atomic_store_explicit(&thread_data_ptr->read_index, ++local_read_index,
@@ -2453,16 +2540,19 @@ static void score_base_node_tree_words(
       uint32_t num_extra_symbols = 0;
       uint32_t lmi = node_ptr->last_match_index;
       if (lmi >= stream_len) {
+        assert(0 && "GST node last_match_index out of range");
         goto score_siblings;
       }
       while (num_extra_symbols != node_ptr->num_extra_symbols) {
         if (lmi + num_extra_symbols >= stream_len) {
+          assert(0 && "GST node span exceeds grammar stream");
           goto score_siblings;
         }
         string_entropy +=
             symbol_entropy[*(start_symbol_ptr + lmi + num_extra_symbols++)];
       }
       if (lmi + num_extra_symbols >= stream_len) {
+        assert(0 && "GST node span exceeds grammar stream");
         goto score_siblings;
       }
       if (*(start_symbol_ptr + lmi + num_extra_symbols) == 0x20) {
@@ -2488,6 +2578,7 @@ static void score_base_node_tree_words(
             float score = (repeats * profit_per_substitution) - production_cost;
             if (score > min_score) {
               if (node_ptrs_num >= 0xFFFE) {
+                glza_warn_rank_buffer_limit();
                 goto score_siblings;
               }
               if ((node_ptrs_num & 0xFFF) == 0) {
@@ -2510,6 +2601,7 @@ static void score_base_node_tree_words(
         goto score_siblings;
       }
       if (lmi + num_extra_symbols >= stream_len) {
+        assert(0 && "GST node span exceeds grammar stream");
         goto score_siblings;
       }
       string_entropy +=
@@ -2525,6 +2617,7 @@ static void score_base_node_tree_words(
       }
       num_symbols += num_extra_symbols + 1;
       if ((uint32_t)node_ptr->child_node_num >= nodes_num_limit) {
+        assert(0 && "GST child node index out of range");
         goto score_siblings;
       }
       node_ptr = &nodes[node_ptr->child_node_num];
@@ -2904,6 +2997,9 @@ thread_overlap_check_no_defs_loop_match:
               child_ptr_array[symbol] == 0) {
             goto thread_overlap_check_no_defs_loop_no_match;
           }
+          // normal EOS while restarting from root:
+          // one symbol was consumed above, so the cursor may sit one past
+          // stop_symbol_ptr
           if (in_symbol_ptr > end_symbol_ptr) {
             return 0;
           }
@@ -2917,6 +3013,7 @@ thread_overlap_check_no_defs_loop_match:
     } while (symbol != match_node_ptr->symbol);
   }
   if (match_node_ptr->child_ptr != 0) {
+    /* Same stream-end tolerance as above: allow a trailing partial match. */
     if (in_symbol_ptr > end_symbol_ptr) {
       if (in_symbol_ptr - match_node_ptr->num_symbols >= end_symbol_ptr) {
         return 0;
@@ -3109,7 +3206,7 @@ static void *substitute_thread(void *arg) {
                   "max_rule_symbol %u\n",
                   (unsigned int)symbol,
                   (unsigned int)thread_data_ptr->max_rule_symbol);
-          return 0;
+          GLZA_DIE("ERROR - substitute_thread grammar corruption\n");
         }
         *thread_data_ptr->out_symbol_ptr++ = symbol;
         thread_data_ptr->symbol_counts[symbol]++;
@@ -3393,7 +3490,6 @@ static void scan_mode0(
         add_word_suffix(in_symbol_ptr, &next_node_num);
       }
     }
-    // in_symbol_ptr < end_symbol_ptr || symbol == EOF
   }
   *out_next_node_num = next_node_num;
 
@@ -3520,6 +3616,7 @@ static void scan_mode0(
                 (num_match_nodes * sizeof(struct match_node)) +
                 (4 * max_match_length) >=
             match_region_end_limit) {
+          glza_warn_match_nodes_limit();
           num_candidates = candidate_num != 0 ? candidate_num - 1 : 0;
           break;
         }
@@ -3611,6 +3708,7 @@ static void scan_mode0(
               uint32_t symbol = *best_score_match_ptr;
               if (match_node_ptr->child_ptr == 0) {
                 if (num_match_nodes >= match_nodes_limit) {
+                  glza_warn_match_nodes_limit();
                   candidate_bad[candidate_num] = 1;
                   break;
                 }
@@ -3627,6 +3725,7 @@ static void scan_mode0(
                   }
                 } else {
                   if (num_match_nodes >= match_nodes_limit) {
+                    glza_warn_match_nodes_limit();
                     candidate_bad[candidate_num] = 1;
                     break;
                   }
@@ -4236,8 +4335,10 @@ static void build_and_score_suffix_tree(
                               memory_order_relaxed);
         if ((int32_t)*in_symbol_ptr >= 0) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
-          if (next_node_num >= main_nodes_limit)
+          if (next_node_num >= main_nodes_limit) {
+            glza_warn_main_nodes_limit();
             goto done_building_tree_tree;
+          }
         }
       }
     } while (symbol != 0xFFFFFFFE);
@@ -4302,6 +4403,7 @@ static void build_and_score_suffix_tree(
       if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
         add_suffix(symbol, in_symbol_ptr, &next_node_num);
         if (next_node_num >= main_nodes_limit) {
+          glza_warn_main_nodes_limit();
           break;
         }
       }
@@ -4557,6 +4659,7 @@ static void process_ranked_candidates(
               ((uintptr_t)(candidate_num + 1) * max_match_length *
                sizeof(uint32_t)) >=
           match_region_end_limit) {
+        glza_warn_match_nodes_limit();
         num_candidates = candidate_num != 0 ? candidate_num - 1 : 0;
         break;
       }
@@ -4578,6 +4681,7 @@ static void process_ranked_candidates(
         symbol = *best_score_match_ptr;
         if (match_node_ptr->child_ptr == 0) {
           if (num_match_nodes >= match_nodes_limit) {
+            glza_warn_match_nodes_limit();
             candidate_bad[candidate_num] = 1;
             break;
           }
@@ -4595,6 +4699,7 @@ static void process_ranked_candidates(
             }
           } else {
             if (num_match_nodes >= match_nodes_limit) {
+              glza_warn_match_nodes_limit();
               candidate_bad[candidate_num] = 1;
               break;
             }
@@ -5805,8 +5910,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
                  sizeof(struct rank_scores_thread_data)))) ||
       ((fast_mode != 0) &&
        (0 == (score_map = (int16_t *)malloc(2 * in_size))))) {
-    fprintf(stderr, "ERROR - memory allocation failed\n");
-    return 0;
+    GLZA_DIE("ERROR - memory allocation failed\n");
   }
 
   uint32_t max_scores = fast_mode == 1
@@ -5830,7 +5934,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
               "ERROR - Insufficient RAM to compress - unable to allocate %zu "
               "bytes\n",
               (size_t)available_RAM);
-      return 0;
+      exit(1);
     }
     if (available_RAM < (41 * (uint64_t)in_size) / 10) {
       fprintf(stderr,
@@ -5838,7 +5942,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
               "least %.2lf MB\n",
               ((float)((41 * (uint64_t)in_size) / 10) / (float)0x100000) +
                   0.005);
-      return 0;
+      exit(1);
     }
   } else {
     available_RAM = ((uint64_t)in_size * 250) + 40000000;
@@ -5861,7 +5965,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
               "ERROR - Insufficient RAM to compress - unable to allocate %zu "
               "bytes\n",
               (size_t)((available_RAM * 10) / 9));
-      return 0;
+      exit(1);
     }
   }
   uint8_t *end_RAM_ptr = (uint8_t *)start_symbol_ptr +
@@ -5983,7 +6087,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
         (size_t)((4 * (uint64_t)in_size) +
                  (4 * BASE_NODES_CHILD_ARRAY_SIZE * num_terminals) +
                  (0x10 * MAX_SCORES_FAST)));
-    return 0;
+    exit(1);
   }
   if (params != 0 && params->max_rules + num_terminals < max_rules) {
     max_rules = params->max_rules + num_terminals;
@@ -6024,7 +6128,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
             "ERROR - Insufficient RAM to compress - program requires at least "
             "%.2lf MB\n",
             ((float)min_RAM / (float)0x100000) + 0.005);
-    return 0;
+    exit(1);
   }
 
   uint32_t *new_symbol_number;  /* run-length dedup: terminal -> new repeat
@@ -6041,8 +6145,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
       (0 == (candidate_bad = (uint8_t *)malloc(max_scores))) ||
       ((fast_mode == 0) &&
        (0 == (x_log2_x = (double *)malloc(8 * max_x_log2_x))))) {
-    fprintf(stderr, "ERROR - memory allocation failed\n");
-    return 0;
+    GLZA_DIE("ERROR - memory allocation failed\n");
   }
 
   uint32_t num_terminals_used = 0;
@@ -6080,8 +6183,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
     fast_sections = 1;
   } else {
     if (0 == (candidates_position = (uint16_t *)malloc(2 * max_scores))) {
-      fprintf(stderr, "ERROR - memory allocation failed\n");
-      return 0;
+      GLZA_DIE("ERROR - memory allocation failed\n");
     }
     rank_scores_data_ptr->candidates_position = candidates_position;
     fast_sections = 23;
@@ -6126,9 +6228,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
   free(candidate_bad);
 
   if ((*iobuf = (uint8_t *)malloc((4 * num_file_symbols) + 1)) == 0) {
-    fprintf(stderr,
-            "ERROR - Compressed output buffer memory allocation failed\n");
-    return 0;
+    GLZA_DIE("ERROR - Compressed output buffer memory allocation failed\n");
   }
   in_char_ptr = *iobuf;
   if (UTF8_compliant != 0) {
@@ -6194,6 +6294,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
               "(num_terminals=%u num_rules=%u next_new_symbol_number=%u)\n",
               (unsigned int)invalid_count, (unsigned int)num_terminals,
               (unsigned int)num_rules, (unsigned int)next_new_symbol_number);
+      GLZA_DIE("ERROR - invalid grammar stream\n");
     }
   }
   if (UTF8_compliant != 0) {
@@ -6250,9 +6351,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
 
   in_size = in_char_ptr - *iobuf;
   if ((*iobuf = (uint8_t *)realloc(*iobuf, in_size)) == 0) {
-    fprintf(stderr,
-            "ERROR - Compressed output buffer memory reallocation failed\n");
-    return 0;
+    GLZA_DIE("ERROR - Compressed output buffer memory reallocation failed\n");
   }
   *outsize_ptr = in_size;
   free(start_symbol_ptr);
