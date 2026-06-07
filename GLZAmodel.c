@@ -31,7 +31,8 @@ uint16_t RangeScaleSID[2], FreqSID[2][16], RangeScaleINST[2][16], FreqINST[2][16
 uint16_t FreqWordTag[0x100], FreqERG[341], FreqGoMtf[0x5A0];
 uint16_t RangeScaleMtfPos[3], FreqMtfPos[3][0x100], FreqSymTypePriorType[0x34][2], FreqSymTypePriorEnd[0x100][2], FreqMtfFirst[2][3];
 uint8_t CapEncoded, UTF8Compliant, MaxBaseCode, MaxInstCode, *InBuffer, *OutBuffer;
-uint8_t CapInitialized, CapLockInitialized;
+uint8_t CapInitialized, CapLockInitialized, EncoderFailed, DecoderFailed;
+size_t OutBufferSize;
 uint16_t RangeScaleFirstCharSection[0x100][7], RangeScaleFirstChar[4][0x100];
 struct first_char_data {
   union {
@@ -44,6 +45,42 @@ struct first_char_data {
 };
 struct first_char_data FirstCharData[4][0x100][0x100];
 uint8_t NumBaseSymbols = 0;
+
+static void encoder_fail(const char *reason) {
+  if (EncoderFailed == 0) {
+    fprintf(stderr,
+        "GLZA encode: %s (OutCharNum=%u OutBufferSize=%zu low=0x%08x range=0x%08x)\n",
+        reason, (unsigned int)OutCharNum, OutBufferSize, low, range);
+    EncoderFailed = 1;
+  }
+}
+
+static void decoder_fail(const char *reason) {
+  if (DecoderFailed == 0) {
+    fprintf(stderr,
+        "GLZA decode: %s (InCharNum=%u code=0x%08x low=0x%08x range=0x%08x)\n",
+        reason, (unsigned int)InCharNum, code, low, range);
+    DecoderFailed = 1;
+  }
+}
+
+static int check_mtf_pos(const char *where, uint8_t position, uint16_t queue_size) {
+  if (queue_size > 0xFF) {
+    fprintf(stderr,
+        "GLZA encode: MTF queue size %u exceeds FreqMtfPos table limit 255 in %s (position=%u)\n",
+        (unsigned int)queue_size, where, (unsigned int)position);
+    EncoderFailed = 1;
+    return 0;
+  }
+  if (queue_size != 0 && position >= queue_size) {
+    fprintf(stderr,
+        "GLZA encode: MTF position %u >= queue size %u in %s\n",
+        (unsigned int)position, (unsigned int)queue_size, where);
+    EncoderFailed = 1;
+    return 0;
+  }
+  return 1;
+}
 
 uint32_t ReadLow() {return(low);}
 uint32_t ReadRange() {return(range);}
@@ -182,6 +219,12 @@ void StartModelFirstChar() {
   uint8_t i = 0xFF;
   do {
     uint8_t j = 0xFF;
+    do {
+      FirstCharData[0][i][j].data.freq = 0;
+      FirstCharData[1][i][j].data.freq = 0;
+      FirstCharData[2][i][j].data.freq = 0;
+      FirstCharData[3][i][j].data.freq = 0;
+    } while (j-- != 0);
     RangeScaleFirstChar[0][i] = 0;
     RangeScaleFirstChar[1][i] = 0;
     RangeScaleFirstChar[2][i] = 0;
@@ -458,11 +501,58 @@ void DoubleRange(uint8_t low_ranges) {
 }
 
 void WriteOutBuffer(uint8_t value) {
+  if (EncoderFailed != 0)
+    return;
+  if (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize) {
+    encoder_fail("output buffer overflow in WriteOutBuffer");
+    return;
+  }
   OutBuffer[OutCharNum++] = value;
 }
 
+void SetOutBufferCapacity(size_t size) {
+  OutBufferSize = size;
+}
+
+uint8_t ReadEncoderFailed() {
+  return(EncoderFailed);
+}
+
+void SetEncoderFailed(const char *reason) {
+  encoder_fail(reason);
+}
+
+uint8_t ReadDecoderFailed() {
+  return(DecoderFailed);
+}
+
+void SetDecoderFailed(const char *reason) {
+  decoder_fail(reason);
+}
+
+void ResetCodecGlobals(void) {
+  InCharNum = 0;
+  OutCharNum = 0;
+  InBuffer = 0;
+  OutBuffer = 0;
+  OutBufferSize = 0;
+  EncoderFailed = 0;
+  DecoderFailed = 0;
+}
+
 void NormalizeEncoder(uint32_t bot) {
+  uint32_t normalize_steps = 0;
   while ((low ^ (low + range)) < TOP || (range < bot && ((range = -low & (bot - 1)), 1))) {
+    if (EncoderFailed != 0)
+      return;
+    if (OutBufferSize != 0 && OutCharNum + 1 > OutBufferSize) {
+      encoder_fail("output buffer overflow in NormalizeEncoder");
+      return;
+    }
+    if (++normalize_steps > 64) {
+      encoder_fail("arithmetic encoder normalization exceeded 64 steps (corrupt low/range?)");
+      return;
+    }
     OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
     range <<= 8;
     low <<= 8;
@@ -645,11 +735,20 @@ void EncodeMtfFirst(uint8_t Context, uint8_t First, uint16_t QueueSizeOther, uin
 }
 
 void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
+  if (!check_mtf_pos("EncodeMtfPos", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -700,11 +799,20 @@ void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
 
 
 void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
+  if (!check_mtf_pos("EncodeMtfPosAz", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
     do {
+      if (last_queue_size_az >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF az queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_az);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_az -= FreqMtfPos[2][last_queue_size_az++];
       if (last_queue_size_az > rescale_queue_size_az) {
         rescale_queue_size_az++;
@@ -753,11 +861,20 @@ void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
+  if (!check_mtf_pos("EncodeMtfPosSpace", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
     do {
+      if (last_queue_size_space >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF space queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_space);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_space -= FreqMtfPos[1][last_queue_size_space++];
       if (last_queue_size_space > rescale_queue_size_space) {
         rescale_queue_size_space++;
@@ -806,11 +923,20 @@ void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeMtfPosOther(uint8_t position, uint16_t QueueSize) {
+  if (!check_mtf_pos("EncodeMtfPosOther", position, QueueSize))
+    return;
   NormalizeEncoder(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA encode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        EncoderFailed = 1;
+        return;
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1007,6 +1133,10 @@ void EncodeWordTag(uint8_t Symbol, uint8_t Context) {
 }
 
 void EncodeShortDictionarySymbol(uint16_t BinNum, uint16_t DictionaryBins, uint16_t CodeBins) {
+  if (DictionaryBins == 0)
+    DictionaryBins = 1;
+  if (CodeBins == 0)
+    CodeBins = 1;
   NormalizeEncoder(1 << 12);
   low += BinNum * (range /= DictionaryBins);
   range *= (uint32_t)CodeBins;
@@ -1130,8 +1260,11 @@ void InitEncoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   UTF8Compliant = UTF8_compliant;
   MaxBaseCode = max_base_code;
   MaxInstCode = num_inst_codes - 1;
+  NumBaseSymbols = 0;
   OutBuffer = bufptr;
   OutCharNum = 0;
+  OutBufferSize = 0;
+  EncoderFailed = 0;
   low = 0, range = -1;
   StartModelSymType(use_mtf, cap_encoded);
   StartModelMtfFirst();
@@ -1156,6 +1289,12 @@ void InitEncoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
 }
 
 void FinishEncoder() {
+  if (EncoderFailed != 0)
+    return;
+  if (OutBufferSize != 0 && OutCharNum + 4 > OutBufferSize) {
+    encoder_fail("output buffer overflow in FinishEncoder");
+    return;
+  }
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 24);
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 16);
   OutBuffer[OutCharNum++] = (uint8_t)(low >> 8);
@@ -1163,6 +1302,8 @@ void FinishEncoder() {
 }
 
 void NormalizeDecoder(uint32_t bot) {
+  if (DecoderFailed != 0)
+    return;
   while ((low ^ (low + range)) < TOP || (range < (bot) && ((range = -low & ((bot) - 1)), 1))) {
     code = (code << 8) | InBuffer[InCharNum++];
     low <<= 8;
@@ -1357,11 +1498,24 @@ uint8_t DecodeMtfFirst(uint8_t Context, uint16_t QueueSizeOther, uint16_t QueueS
 }
 
 uint8_t DecodeMtfPos(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPos");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        decoder_fail("MTF pos table overflow in DecodeMtfPos");
+        return(0);
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1412,11 +1566,24 @@ uint8_t DecodeMtfPos(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosAz(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosAz");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
     do {
+      if (last_queue_size_az >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF az queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_az);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosAz");
+        return(0);
+      }
       unused_queue_freq_az -= FreqMtfPos[2][last_queue_size_az++];
       if (last_queue_size_az > rescale_queue_size_az) {
         rescale_queue_size_az++;
@@ -1468,11 +1635,24 @@ uint8_t DecodeMtfPosAz(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosSpace(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosSpace");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
     do {
+      if (last_queue_size_space >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF space queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_space);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosSpace");
+        return(0);
+      }
       unused_queue_freq_space -= FreqMtfPos[1][last_queue_size_space++];
       if (last_queue_size_space > rescale_queue_size_space) {
         rescale_queue_size_space++;
@@ -1525,11 +1705,24 @@ uint8_t DecodeMtfPosSpace(uint16_t QueueSize) {
 }
 
 uint8_t DecodeMtfPosOther(uint16_t QueueSize) {
+  if (QueueSize > 0xFF) {
+    decoder_fail("MTF queue size exceeds FreqMtfPos table limit in DecodeMtfPosOther");
+    return(0);
+  }
   NormalizeDecoder(FREQ_MTF_POS_BOT);
+  if (DecoderFailed != 0)
+    return(0);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
     do {
+      if (last_queue_size_other >= 0xFF) {
+        fprintf(stderr,
+            "GLZA decode: MTF other queue index overflow growing to QueueSize=%u (last=%u)\n",
+            (unsigned int)QueueSize, (unsigned int)last_queue_size_other);
+        decoder_fail("MTF pos table overflow in DecodeMtfPosOther");
+        return(0);
+      }
       unused_queue_freq_other -= FreqMtfPos[0][last_queue_size_other++];
       if (last_queue_size_other > rescale_queue_size_other) {
         rescale_queue_size_other++;
@@ -1886,14 +2079,17 @@ void InitDecoder(uint8_t max_base_code, uint8_t num_inst_codes, uint8_t cap_enco
   uint8_t i, j;
   CapInitialized = 0;
   CapLockInitialized = 0;
+  DecoderFailed = 0;
   CapEncoded = cap_encoded;
   UTF8Compliant = UTF8_compliant;
   MaxBaseCode = max_base_code;
   MaxInstCode = num_inst_codes - 1;
+  NumBaseSymbols = 0;
   InBuffer = inbuf;
   code = 0, range = -1;
   for (low = 4; low != 0; low--)
     code = (code << 8) | InBuffer[InCharNum++];
+  low = 0;
   StartModelSymType(use_mtf, cap_encoded);
   StartModelMtfFirst();
   StartModelMtfPos();

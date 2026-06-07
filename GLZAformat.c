@@ -64,7 +64,7 @@ double calculate_order_1_entropy(uint32_t symbol_counts[0x100], uint32_t order_1
 }
 
 
-uint8_t GLZAformat(int32_t insize, uint8_t * inbuf, int32_t * outsize_ptr, uint8_t ** outbuf, struct param_data * params) {
+uint8_t GLZAformat(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t ** outbuf, struct param_data * params) {
   const uint32_t CHARS_TO_WRITE = 0x40000;
   uint8_t this_char, prev_char, next_char, cap_encoded, cap_lock_disabled, delta_disabled, stride;
   uint8_t *inbuf2, *in_char_ptr, *end_char_ptr, *out_char_ptr;
@@ -105,9 +105,11 @@ uint8_t GLZAformat(int32_t insize, uint8_t * inbuf, int32_t * outsize_ptr, uint8
       num_spaces++;
     if ((this_char >= 'A') && (this_char <= 'Z')) {
       num_AZ++;
-      next_char = *in_char_ptr & 0xDF;
-      if ((next_char >= 'A') && (next_char <= 'Z'))
-        num_az_post_AZ++;
+      if (in_char_ptr < end_char_ptr) {
+        next_char = *in_char_ptr & 0xDF;
+        if ((next_char >= 'A') && (next_char <= 'Z'))
+          num_az_post_AZ++;
+      }
     }
 
     while (in_char_ptr != end_char_ptr) {
@@ -117,9 +119,11 @@ uint8_t GLZAformat(int32_t insize, uint8_t * inbuf, int32_t * outsize_ptr, uint8
       if ((this_char >= 'A') && (this_char <= 'Z')) {
         num_AZ++;
         prev_char = *(in_char_ptr - 2) & 0xDF;
-        next_char = *in_char_ptr & 0xDF;
-        if ((next_char >= 'A') && (next_char <= 'Z'))
-          num_az_post_AZ++;
+        if (in_char_ptr < end_char_ptr) {
+          next_char = *in_char_ptr & 0xDF;
+          if ((next_char >= 'A') && (next_char <= 'Z'))
+            num_az_post_AZ++;
+        }
         if ((prev_char >= 'A') && (prev_char <= 'Z'))
           num_az_pre_AZ++;
       }

@@ -1,0 +1,48 @@
+  max_rules=5000 1m                        FAIL (exit 139, expected 0)
+    GLZA compress: match prefix-tree node limit reached (increase RAM or reduce candidates)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=44860 OutBufferSize=4337228 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 98: 25662 Segmentation fault: 11     ./rt_large 5000 enwik1m
+
+  rt_test NULL+CLI 100m (flaky 138)        FAIL (exit 1, expected 0)
+    GLZA compress: invalid terminal symbol 1093834977 >= next_new_symbol_number 171727 at stream index 108369520 (pass 0 rules 5000)
+    GLZA compress: invalid terminal symbol 1097519289 >= next_new_symbol_number 171727 at stream index 108369521 (pass 0 rules 5000)
+    GLZA compress: invalid terminal symbol 1095361022 >= next_new_symbol_number 171727 at stream index 108369522 (pass 0 rules 5000)
+    GLZA compress: 6038 additional invalid symbols in grammar stream
+    GLZA compress: 6046 invalid symbols in final stream (num_terminals=166727 num_rules=5000 next_new_symbol_number=171727)
+    GLZA encode: grammar terminal symbol 6936787 >= num_codes 267145 (grammar_bytes=108621440 num_base_symbols=262144)
+    params=NULL reps=1 -> -1 (outsize after last compress ok if 0)
+    params=CLI  reps=1 -> 0
+
+  max_rules=6320 100m (flaky 139)          FAIL (exit 139, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=1855787 OutBufferSize=541263300 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 98: 44119 Segmentation fault: 11     ./rt_large 6320 enwik100m
+
+  max_rules=6330 1m                        FAIL (exit 139, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=212559 OutBufferSize=4248716 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95:  6591 Segmentation fault: 11     ./rt_large 6330 enwik1m
+
+  max_rules=6310 10m                       FAIL (exit 139, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=2515419 OutBufferSize=46769540 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95:   940 Segmentation fault: 11     ./rt_large 6310 enwik10m
+
+  max_rules=5000 10m                       FAIL (exit 139, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=1529879 OutBufferSize=50857536 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95:   875 Segmentation fault: 11     ./rt_large 5000 enwik10m
+
+  max_rules=6000 100m                      FAIL (exit 139, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=4862738 OutBufferSize=541281148 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95:   408 Segmentation fault: 11     ./rt_large 6000 enwik100m
+
+  max_rules=6320 100m                      FAIL (exit 139, expected 0)
+    GLZA compress: invalid terminal symbol 169628 >= next_new_symbol_number 166727 at stream index 14844 (pass 0 rules 0)
+    GLZA compress: invalid terminal symbol 167370 >= next_new_symbol_number 166727 at stream index 14888 (pass 0 rules 0)
+    GLZA compress: invalid terminal symbol 166794 >= next_new_symbol_number 166727 at stream index 16260 (pass 0 rules 0)
+    GLZA compress: invalid terminal symbol 169853 >= next_new_symbol_number 166727 at stream index 18105 (pass 0 rules 0)
+    GLZA compress: 89174 additional invalid symbols in grammar stream
+    GLZA compress: 89182 invalid symbols in final stream (num_terminals=166727 num_rules=0 next_new_symbol_number=166727)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=1855961 OutBufferSize=541263300 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95: 98949 Segmentation fault: 11     ./rt_large 6320 enwik100m
+
+  rt_test NULL+CLI 100m                    FAIL (exit 138, expected 0)
+    GLZA encode: arithmetic encoder normalization exceeded 64 steps (corrupt low/range?) (OutCharNum=6089034 OutBufferSize=541343440 low=0x00000000 range=0x00000000)
+    ./regression.sh: line 95:   203 Bus error: 10              ./rt_test enwik100m 1

@@ -54,6 +54,37 @@ struct transmit_symbols {
 } *transmits;
 
 
+static int encode_queue_ok(void) {
+  return(ReadEncoderFailed() == 0);
+}
+
+static void encode_queue_fail(const char *reason) {
+  SetEncoderFailed(reason);
+}
+
+static void queue_subcount_inc(uint16_t *subcount, const char *which) {
+  if (*subcount >= 0xFF) {
+    fprintf(stderr, "GLZA encode: %s queue overflow (count=%u, total=%u az=%u space=%u other=%u)\n",
+        which, (unsigned int)*subcount, (unsigned int)queue_size, (unsigned int)queue_size_az,
+        (unsigned int)queue_size_space, (unsigned int)queue_size_other);
+    encode_queue_fail("MTF sub-queue overflow");
+    return;
+  }
+  (*subcount)++;
+}
+
+static void queue_subcount_dec(uint16_t *subcount, const char *which) {
+  if (*subcount == 0) {
+    fprintf(stderr, "GLZA encode: %s queue underflow (total=%u az=%u space=%u other=%u)\n",
+        which, (unsigned int)queue_size, (unsigned int)queue_size_az, (unsigned int)queue_size_space,
+        (unsigned int)queue_size_other);
+    encode_queue_fail("MTF sub-queue underflow");
+    return;
+  }
+  (*subcount)--;
+}
+
+
 // type:  bit 0: string starts a-z, bit 1: non-ergodic, bit 2: "word" ending determined,
 //        bits 4-3: 0: not a word, 1: word, 2: word & >= 15 repeats (ending sub)symbol & likely followed by ' ',
 //                  3: word & >= 15 repeats (ending sub)symbol
@@ -110,6 +141,26 @@ uint32_t find_string_length(uint32_t symbol_number) {
   while (symbol_ptr != next_symbol_ptr)
     symbol_size += find_string_length(*symbol_ptr++);
   return(symbol_size);
+}
+
+
+static uint32_t sum_dictionary_string_bytes(uint32_t num_codes_val, uint32_t *first_define) {
+  uint32_t total = 0;
+  uint8_t *visited = (uint8_t *)calloc(num_codes_val, 1);
+  uint32_t *walk_ptr;
+
+  if (visited == 0)
+    return(0);
+  walk_ptr = symbol_array;
+  while (walk_ptr < first_define) {
+    uint32_t sym = *walk_ptr++;
+    if (sym < num_codes_val && visited[sym] == 0) {
+      visited[sym] = 1;
+      total += find_string_length(sym);
+    }
+  }
+  free(visited);
+  return(total);
 }
 
 
@@ -242,25 +293,36 @@ void remove_dictionary_symbol(uint32_t symbol, uint8_t bits) {
 
 
 void add_symbol_to_queue(uint32_t symbol_number) {
+  if (!encode_queue_ok())
+    return;
+  if (queue_size >= 0x100) {
+    fprintf(stderr, "GLZA encode: unified MTF queue full (256 entries)\n");
+    encode_queue_fail("MTF queue full");
+    return;
+  }
   queue_size++;
   sd[symbol_number].type |= 0xC0;
   queue[(uint8_t)(--queue_offset)] = symbol_number;
   if ((sd[symbol_number].type & 1) != 0)
-    queue_size_az++;
+    queue_subcount_inc(&queue_size_az, "az");
   else if (sd[symbol_number].starts == 0x20)
-    queue_size_space++;
+    queue_subcount_inc(&queue_size_space, "space");
   else
-    queue_size_other++;
+    queue_subcount_inc(&queue_size_other, "other");
   return;
 }
 
 
 void update_queue(uint32_t symbol_number, uint8_t in_definition) {
-  uint8_t queue_position = 0;
+  uint16_t queue_position = 0;
   uint32_t az_queue_position = 0;
   uint32_t space_queue_position = 0;
   uint32_t other_queue_position = 0;
-  while (symbol_number != queue[(uint8_t)(queue_position + queue_offset)]) {
+
+  if (!encode_queue_ok())
+    return;
+  while (queue_position < queue_size
+      && symbol_number != queue[(uint8_t)(queue_position + queue_offset)]) {
     if ((sd[queue[(uint8_t)(queue_position + queue_offset)]].type & 1) != 0)
       az_queue_position++;
     else if (sd[queue[(uint8_t)(queue_position + queue_offset)]].starts == 0x20)
@@ -268,6 +330,14 @@ void update_queue(uint32_t symbol_number, uint8_t in_definition) {
     else
       other_queue_position++;
     queue_position++;
+  }
+  if (queue_position >= queue_size
+      || symbol_number != queue[(uint8_t)(queue_position + queue_offset)]) {
+    fprintf(stderr,
+        "GLZA encode: symbol %u not in MTF queue (queue_size=%u in_definition=%u)\n",
+        (unsigned int)symbol_number, (unsigned int)queue_size, (unsigned int)in_definition);
+    encode_queue_fail("MTF symbol not in queue");
+    return;
   }
 
   if (cap_encoded != 0) {
@@ -293,6 +363,8 @@ void update_queue(uint32_t symbol_number, uint8_t in_definition) {
     queue[(uint8_t)(queue_offset + queue_position)] = queue[(uint8_t)(queue_offset + queue_position - 1)];
     queue_position--;
   }
+  if (!encode_queue_ok())
+    return;
   if (transmits[num_transmits].distance != 0xFFFFFFFF) {
     uint16_t context = 6 * (sd[symbol_number].count - 1);
     if (cap_encoded != 0)
@@ -302,11 +374,11 @@ void update_queue(uint32_t symbol_number, uint8_t in_definition) {
   } else {
     queue_size--;
     if ((sd[symbol_number].type & 1) != 0)
-      queue_size_az--;
+      queue_subcount_dec(&queue_size_az, "az");
     else if (sd[symbol_number].starts == 0x20)
-      queue_size_space--;
+      queue_subcount_dec(&queue_size_space, "space");
     else
-      queue_size_other--;
+      queue_subcount_dec(&queue_size_other, "other");
 
     queue_offset++;
     if ((sd[symbol_number].count > MAX_INSTANCES_FOR_REMOVE)
@@ -324,25 +396,49 @@ void update_queue(uint32_t symbol_number, uint8_t in_definition) {
 
 
 void update_queue_prior_cap(uint32_t symbol_number, uint8_t in_definition) {
-  uint8_t queue_position = 0;
+  uint16_t queue_position = 0;
   uint8_t az_queue_position = 0;
 
-  while (symbol_number != queue[(uint8_t)(queue_position + queue_offset)])
-    if ((sd[queue[(uint8_t)(queue_position++ + queue_offset)]].type & 1) != 0)
+  if (!encode_queue_ok())
+    return;
+  if ((sd[symbol_number].type & 1) == 0) {
+    fprintf(stderr,
+        "GLZA encode: update_queue_prior_cap on non-az symbol %u (use unified queue path)\n",
+        (unsigned int)symbol_number);
+    encode_queue_fail("MTF cap-path on non-az symbol");
+    return;
+  }
+  while (queue_position < queue_size
+      && symbol_number != queue[(uint8_t)(queue_position + queue_offset)]) {
+    if ((sd[queue[(uint8_t)(queue_position + queue_offset)]].type & 1) != 0)
       az_queue_position++;
+    queue_position++;
+  }
+  if (queue_position >= queue_size
+      || symbol_number != queue[(uint8_t)(queue_position + queue_offset)]) {
+    fprintf(stderr,
+        "GLZA encode: az-cap symbol %u not in MTF queue (queue_size=%u az=%u)\n",
+        (unsigned int)symbol_number, (unsigned int)queue_size, (unsigned int)queue_size_az);
+    encode_queue_fail("MTF az-cap symbol not in queue");
+    return;
+  }
   while (queue_position != 0) {
     queue[(uint8_t)(queue_offset + queue_position)] = queue[(uint8_t)(queue_offset + queue_position - 1)];
     queue_position--;
   }
+  if (!encode_queue_ok())
+    return;
   EncodeMtfType(2 + in_definition, 0x2C + 4 * in_definition + (sd[prior_symbol].type & 3), 'C');
   EncodeMtfPosAz(az_queue_position, queue_size_az);
+  if (!encode_queue_ok())
+    return;
   if (transmits[num_transmits].distance != 0xFFFFFFFF) {
     uint16_t context = 6 * (sd[symbol_number].count - 1) + 2 + 3 * ((sd[symbol_number].type & 0x18) == 0x10);
     EncodeGoMtf(context, 1, 1);
     queue[queue_offset] = symbol_number;
   } else {
     queue_size--;
-    queue_size_az--;
+    queue_subcount_dec(&queue_size_az, "az");
     queue_offset++;
     if ((sd[symbol_number].count > MAX_INSTANCES_FOR_REMOVE) || (sd[symbol_number].hits != sd[symbol_number].count)) {
       uint16_t context = 6 * (sd[symbol_number].count - 1) + 2 + 3 * ((sd[symbol_number].type & 0x18) == 0x10);
@@ -677,10 +773,10 @@ uint8_t embed_define(uint32_t define_symbol, uint8_t in_definition) {
           return(0);
       } else {
         if ((sd[symbol].type & 0x40) != 0) {
-          if (prior_is_cap == 0)
-            update_queue(symbol, 1);
-          else
+          if (prior_is_cap != 0 && (sd[symbol].type & 1) != 0)
             update_queue_prior_cap(symbol, 1);
+          else
+            update_queue(symbol, 1);
         } else {
           if (cap_encoded != 0) {
             if (prior_is_cap == 0)
@@ -841,7 +937,8 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   const uint8_t DEFINE_SYMBOL_CHAR = 0xFF;
   const size_t WRITE_SIZE = 0x40000;
   uint8_t temp_char, base_bits, format, verbose, code_length, increase_length, decrease_length;
-  uint8_t *in_char_ptr, *end_char_ptr;
+  uint8_t *in_char_ptr, *end_char_ptr, *enc_buf;
+  size_t enc_buf_size = 0;
   uint16_t queue_position;
   uint32_t i, j, k, num_symbols_defined, num_definitions_to_code, num_codes, grammar_size, dictionary_size;
   uint32_t num_more_than_15_inst_definitions, num_2_inst_definitions, num_greater_500, num_transmits_over_sqrt2, num_mtfs;
@@ -860,6 +957,11 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
 
   verbose = cap_encoded = UTF8_compliant = num_symbols_defined = 0;
   first_define_ptr = 0;
+  end_char = 0;
+  prior_symbol = 0;
+  num_transmits = 0;
+  num_grammar_rules = 0;
+  found_first_symbol = 0;
   use_mtf = 2;
   if (params != 0) {
     verbose = params->print_dictionary;
@@ -959,10 +1061,36 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   symbol_ptr = symbol_array;
   while (symbol_ptr != end_symbol_ptr) {
     symbol = *symbol_ptr++;
-    if ((int32_t)symbol >= 0)
+    if ((int32_t)symbol >= 0) {
+      if (symbol >= num_codes) {
+        fprintf(stderr,
+            "GLZA encode: grammar terminal symbol %u >= num_codes %u (grammar_bytes=%u num_base_symbols=%u)\n",
+            (unsigned int)symbol, (unsigned int)num_codes, (unsigned int)grammar_size,
+            (unsigned int)num_base_symbols);
+        free(transmits);
+        free(ranked_symbols2);
+        free(ranked_symbols);
+        free(sd);
+        free(symbol_array);
+        return(0);
+      }
       sd[symbol].count++;
-    else
-      sd[symbol - 0x80000000 + num_base_symbols].symbol_start_index = symbol_ptr - symbol_array;
+    } else {
+      uint32_t rule_index = symbol - 0x80000000 + num_base_symbols;
+      if (rule_index >= num_codes) {
+        fprintf(stderr,
+            "GLZA encode: grammar rule index %u >= num_codes %u (raw=0x%08x grammar_bytes=%u)\n",
+            (unsigned int)rule_index, (unsigned int)num_codes, (unsigned int)symbol,
+            (unsigned int)grammar_size);
+        free(transmits);
+        free(ranked_symbols2);
+        free(ranked_symbols);
+        free(sd);
+        free(symbol_array);
+        return(0);
+      }
+      sd[rule_index].symbol_start_index = symbol_ptr - symbol_array;
+    }
   }
   sd[num_codes].symbol_start_index = symbol_ptr - symbol_array + 1;
 
@@ -1234,7 +1362,6 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   }
 
   num_transmits = 0;
-  dictionary_size = 0;
   for (i = 0 ; i < num_codes ; i++) {
     sd[i].hits = 0;
     sd[i].previous = 0xFFFFFFFF;
@@ -1245,7 +1372,6 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
     symbol = *symbol_ptr++;
     if (sd[symbol].previous == 0xFFFFFFFF) {
       get_embedded_symbols(symbol);
-      dictionary_size += find_string_length(symbol);
     } else {
       transmits[sd[symbol].previous].distance = num_transmits - sd[symbol].previous;
       transmits[num_transmits].distance = 0xFFFFFFFF;
@@ -2022,12 +2148,16 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   if (UTF8_compliant != 0)
     temp_char = 0x90;
 
-  if ((fd != 0) && ((outbuf = (uint8_t *)malloc(in_size * 2 + 100000)) == 0)) {
-    fprintf(stderr, "Error - encoded data memory allocation failed\n");
-    return(0);
+  {
+    enc_buf_size = in_size * 4 + file_size + 100000;
+    if ((enc_buf = (uint8_t *)malloc(enc_buf_size)) == 0) {
+      fprintf(stderr, "Error - encoded data memory allocation failed\n");
+      return(0);
+    }
+    InitEncoder(temp_char, MAX_INSTANCES_FOR_REMOVE + (uint32_t)(max_regular_code_length - sd[ranked_symbols[0]].code_length) + 1,
+        cap_encoded, UTF8_compliant, use_mtf, enc_buf);
+    SetOutBufferCapacity(enc_buf_size);
   }
-  InitEncoder(temp_char, MAX_INSTANCES_FOR_REMOVE + (uint32_t)(max_regular_code_length - sd[ranked_symbols[0]].code_length) + 1,
-      cap_encoded, UTF8_compliant, use_mtf, outbuf);
 
   // HEADER:
   // BYTE 0:  4.0 * log2(file_size)
@@ -2043,6 +2173,7 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   //   else
   // BYTE 5:  7=1, 6-0=stride
 
+  dictionary_size = sum_dictionary_string_bytes(num_codes, first_define_ptr);
   WriteOutBuffer((uint8_t)(12.5 * (log2((double)(dictionary_size + 0x400)) - 10.0)) + 1);
   WriteOutBuffer((cap_encoded << 7) | (UTF8_compliant << 6) | (use_mtf << 5) | (queue_miss_code_length[2] - 1));
   temp_char = (((format & 0xFE) != 0) << 5) | (sd[ranked_symbols[0]].code_length - 1);
@@ -2074,8 +2205,13 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   do {
     for (j = 1 ; j <= max_code_length ; j++) {
       sym_list_bits[i][j] = 2;
+      if (sym_list_ptrs[i][j] != 0) {
+        free(sym_list_ptrs[i][j]);
+        sym_list_ptrs[i][j] = 0;
+      }
       if (0 == (sym_list_ptrs[i][j] = (uint32_t *)malloc(sizeof(uint32_t) * 4))) {
         fprintf(stderr, "Error - symbol list memory allocation failed\n");
+        free(enc_buf);
         return(0);
       }
       nsob[i][j] = 0;
@@ -2099,8 +2235,10 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
 
   symbol = *symbol_ptr++;
   sd[symbol].hits++;
-  if (embed_define(symbol, 0) == 0)
+  if (embed_define(symbol, 0) == 0) {
+    free(enc_buf);
     return(0);
+  }
 
   while (symbol_ptr < first_define_ptr) {
     symbol = *symbol_ptr++;
@@ -2113,14 +2251,16 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
           EncodeNewType(2, 0x2C + (sd[prior_symbol].type & 3), 'C', queue_size_az);
       } else
         EncodeNewTypeBinary(0, prior_end, queue_size);
-      if (embed_define(symbol, 0) == 0)
+      if (embed_define(symbol, 0) == 0) {
+        free(enc_buf);
         return(0);
+      }
     } else {
       if ((sd[symbol].type & 0x40) != 0) {
-        if (prior_is_cap == 0)
-          update_queue(symbol, 0);
-        else
+        if (prior_is_cap != 0 && (sd[symbol].type & 1) != 0)
           update_queue_prior_cap(symbol, 0);
+        else
+          update_queue(symbol, 0);
       } else {
         if (cap_encoded != 0) {
           if (prior_is_cap == 0)
@@ -2174,6 +2314,16 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
     }
   }
 
+  if (ReadEncoderFailed() != 0) {
+    fprintf(stderr,
+        "GLZA encode: encoder failed mid-stream (grammar_bytes=%u enc_buf_size=%zu OutCharNum=%u)\n",
+        (unsigned int)grammar_size, enc_buf_size, (unsigned int)ReadOutCharNum());
+    i = 0xFF;
+    if (UTF8_compliant != 0)
+      i = 0x90;
+    goto encode_cleanup;
+  }
+
   // send EOF and flush output
   if (cap_encoded != 0) {
     EncodeDictType(0, 4 + (sd[prior_symbol].type & 0x18) + 2 * (sd[prior_symbol].type & 7), prior_end, queue_size);
@@ -2191,26 +2341,41 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   i = 0xFF;
   if (UTF8_compliant != 0)
     i = 0x90;
+encode_cleanup:
   do {
-    for (j = 2 ; j <= max_code_length ; j++)
+    for (j = 1 ; j <= max_code_length ; j++) {
       free(sym_list_ptrs[i][j]);
+      sym_list_ptrs[i][j] = 0;
+    }
   } while (i--);
   free(symbol_array);
   free(sd);
   free(ranked_symbols);
   free(ranked_symbols2);
   free(transmits);
+  if (ReadEncoderFailed() != 0) {
+    free(enc_buf);
+    return(0);
+  }
   *outsize_ptr = ReadOutCharNum();
   if (fd != 0) {
     size_t writesize = 0;
     while (*outsize_ptr - writesize > WRITE_SIZE) {
-      fwrite(outbuf + writesize, 1, WRITE_SIZE, fd);
+      fwrite(enc_buf + writesize, 1, WRITE_SIZE, fd);
       writesize += WRITE_SIZE;
       fflush(fd);
     }
-    fwrite(outbuf + writesize, 1, *outsize_ptr - writesize, fd);
+    fwrite(enc_buf + writesize, 1, *outsize_ptr - writesize, fd);
     fflush(fd);
-    free(outbuf);
-  }
+  } else if (*outsize_ptr > file_size) {
+    fprintf(stderr,
+        "GLZA encode: encoded size %zu exceeds caller buffer %zu (grammar_bytes=%u enc_buf_size=%zu)\n",
+        *outsize_ptr, file_size, (unsigned int)grammar_size, enc_buf_size);
+    free(enc_buf);
+    return(0);
+  } else
+    memcpy(outbuf, enc_buf, *outsize_ptr);
+  free(enc_buf);
+  ResetCodecGlobals();
   return(1);
 }
