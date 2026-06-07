@@ -28,7 +28,16 @@ limitations under the License.
 #include "GLZAformat.h"
 #include "GLZAcompress.h"
 #include "GLZAencode.h"
+#include "GLZAfail.h"
 
+
+const char *GLZA_last_fail_stage(void) {
+  return(GLZAfail_stage());
+}
+
+const char *GLZA_last_fail_detail(void) {
+  return(GLZAfail_detail());
+}
 
 uint8_t GLZAcomp(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t *outbuf, FILE * fd,
     struct param_data * params)
@@ -39,6 +48,7 @@ uint8_t GLZAcomp(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t *
   size_t tempsize;
 
   params = GLZA_params_or_default(params);
+  GLZAfail_clear();
 
   if (insize == 0) {
     *outsize_ptr = 0;
@@ -47,7 +57,10 @@ uint8_t GLZAcomp(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t *
 
   if (fd == 0) {
     tempbuf = (uint8_t *)malloc(insize);
-    if (tempbuf == 0) return(0);
+    if (tempbuf == 0) {
+      GLZAfail_set("format", "input temp buffer alloc failed (insize=%zu)", insize);
+      return(0);
+    }
     memcpy(tempbuf, inbuf, insize);
     status = GLZAformat(insize, (uint8_t *)tempbuf, outsize_ptr, &temp2buf, params);
     free(tempbuf);
@@ -56,14 +69,27 @@ uint8_t GLZAcomp(size_t insize, uint8_t * inbuf, size_t * outsize_ptr, uint8_t *
     status = GLZAformat(insize, (uint8_t *)inbuf, outsize_ptr, &temp2buf, params);
     free(inbuf);
   }
-  if (status == 0)
+  if (status == 0) {
+    if (GLZAfail_stage()[0] == '\0') {
+      GLZAfail_set("format", "GLZAformat failed (insize=%zu)", insize);
+    }
     return(0);
+  }
   tempsize = *outsize_ptr;
   status = GLZAcompress(tempsize, outsize_ptr, &temp2buf, params);
-  if (status == 0)
+  if (status == 0) {
+    if (GLZAfail_stage()[0] == '\0') {
+      GLZAfail_set("compress", "GLZAcompress returned failure (formatted_size=%zu)",
+                   tempsize);
+    }
     return(0);
+  }
   tempsize = *outsize_ptr;
   status = GLZAencode(tempsize, temp2buf, outsize_ptr, outbuf, (FILE *)fd, insize, params);
   free(temp2buf);
+  if (status == 0 && GLZAfail_stage()[0] == '\0') {
+    GLZAfail_set("encode", "GLZAencode returned failure (grammar_bytes=%zu file_size=%zu)",
+                 tempsize, insize);
+  }
   return(status);
 }

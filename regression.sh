@@ -45,8 +45,8 @@ for arg in "$@"; do
   esac
 done
 
-OBJS="GLZAcomp.o GLZAformat.o GLZAcompress.o GLZAencode.o GLZAdecode.o GLZAmodel.o GLZAparams.o"
-SOURCES="GLZAcomp.c GLZAformat.c GLZAcompress.c GLZAencode.c GLZAdecode.c GLZAmodel.c GLZAparams.c"
+OBJS="GLZAcomp.o GLZAformat.o GLZAcompress.o GLZAencode.o GLZAdecode.o GLZAmodel.o GLZAparams.o GLZAfail.o"
+SOURCES="GLZAcomp.c GLZAformat.c GLZAcompress.c GLZAencode.c GLZAdecode.c GLZAmodel.c GLZAparams.c GLZAfail.c"
 
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -120,17 +120,54 @@ run_case() {
   rm -f "$logf"
 }
 
+# macOS 26.4+ changed dyld_shared_cache_iterate_text_swift to allocate during
+# ASAN init, re-entering the runtime and deadlocking (StaticSpinMutex spin).
+# See DEBUG_PLAN.md §3 and LLVM PR #182943 (_dyld_get_dyld_header).
+asan_runtime_ok() {
+  local probe probe_c pid waited rc
+  probe=$(mktemp "${TMPDIR}/glza_asan_probe_XXXX")
+  probe_c="${probe}.c"
+  cat >"$probe_c" <<'EOF'
+int main(void) { return 0; }
+EOF
+  if ! $CLANG -fsanitize=address -o "$probe" "$probe_c" 2>/dev/null; then
+    rm -f "$probe" "$probe_c"
+    return 1
+  fi
+  env ASAN_OPTIONS=detect_leaks=0 "$probe" >/dev/null 2>&1 &
+  pid=$!
+  waited=0
+  while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 3 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$probe" "$probe_c"
+    return 1
+  fi
+  wait "$pid"
+  rc=$?
+  rm -f "$probe" "$probe_c"
+  [[ $rc -eq 0 ]]
+}
+
 build_asan_decode() {
+  if ! asan_runtime_ok; then
+    log "SKIP ASAN: runtime hangs at init on this macOS (dyld/ASAN reentrancy; need LLVM with _dyld_get_dyld_header fix)"
+    return 1
+  fi
   log "ASAN decode build"
   # shellcheck disable=SC2086
   $CLANG $ASAN_CFLAGS -c GLZAdecode.c GLZAmodel.c GLZAparams.c
   # shellcheck disable=SC2086
-  $CLANG $ASAN_CFLAGS -o dec_asan6400 dec_only6500.c GLZAdecode.o GLZAmodel.o GLZAparams.o -lm -pthread
+  $CLANG $ASAN_CFLAGS -o dec_asan6400 ./scripts/test/dec_only6500.c GLZAdecode.o GLZAmodel.o GLZAparams.o -lm -pthread
 }
 
 FAILURES=0
 
-log "GLZA regression (corpus=$CORPUS)"
+log "GLZA regression (corpora: enwik1m enwik10m enwik100m)"
 build_harnesses
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
@@ -143,7 +180,7 @@ run_case "max_rules=5000 1m" "./rt_large 5000 enwik1m" 0
 run_case "max_rules=6000 1m" "./rt_large 6000 enwik1m" 0
 run_case "max_rules=6325 1m" "./rt_large 6325 enwik1m" 0
 
-run_case "max_rules=5000 10m (flaky 139)" "./rt_large 5000 enwik10m" 0
+run_case "max_rules=5000 10m" "./rt_large 5000 enwik10m" 0
 run_case "max_rules=6000 10m" "./rt_large 6000 enwik10m" 0
 run_case "max_rules=6325 10m" "./rt_large 6325 enwik10m" 0
 
@@ -162,19 +199,19 @@ if [[ $MODE_FULL -eq 1 ]]; then
   log "Running 100m and other full test"
 
   run_case "max_rules=5000 100m" "./rt_large 5000 enwik100m" 0
-  run_case "max_rules=6000 100m (flaky 139)" "./rt_large 6000 enwik100m" 0
-  run_case "max_rules=6325 100m (flaky 139)" "./rt_large 6325 enwik100m" 0
-  run_case "max_rules=6330 100m (flaky 139)" "./rt_large 6330 enwik100m" 0
+  run_case "max_rules=6000 100m" "./rt_large 6000 enwik100m" 0
+  run_case "max_rules=6325 100m" "./rt_large 6325 enwik100m" 0
+  run_case "max_rules=6330 100m" "./rt_large 6330 enwik100m" 0
 
   run_case "max_rules=6300 1m" "./rt_large 6300 enwik1m" 0
   run_case "max_rules=6310 1m" "./rt_large 6310 enwik1m" 0
   run_case "max_rules=6320 1m" "./rt_large 6320 enwik1m" 0
   run_case "max_rules=6300 10m" "./rt_large 6300 enwik10m" 0
-  run_case "max_rules=6310 10m (flaky 139)" "./rt_large 6310 enwik10m" 0
+  run_case "max_rules=6310 10m" "./rt_large 6310 enwik10m" 0
   run_case "max_rules=6320 10m" "./rt_large 6320 enwik10m" 0
-  run_case "max_rules=6300 100m (flaky 139)" "./rt_large 6300 enwik100m" 0
+  run_case "max_rules=6300 100m" "./rt_large 6300 enwik100m" 0
   run_case "max_rules=6310 100m" "./rt_large 6310 enwik100m" 0
-  run_case "max_rules=6320 100m (flaky 139)" "./rt_large 6320 enwik100m" 0
+  run_case "max_rules=6320 100m" "./rt_large 6320 enwik100m" 0
 
   run_case "max_rules=6340 1m" "./rt_large 6340 enwik1m" 0
   run_case "max_rules=6400 1m" "./rt_large 6400 enwik1m" 0
@@ -186,33 +223,37 @@ if [[ $MODE_FULL -eq 1 ]]; then
   log "NULL vs explicit params (rt_test, 1 compress rep)"
   run_case "rt_test NULL+CLI 1m" "./rt_test enwik1m 1" 0
   run_case "rt_test NULL+CLI 10m" "./rt_test enwik10m 1" 0
-  run_case "rt_test NULL+CLI 100m (flaky 138)" "./rt_test enwik100m 1" 0
+  run_case "rt_test NULL+CLI 100m" "./rt_test enwik100m 1" 0
+
+  log "fast_mode=0 roundtrip (rt_slow; 10m/100m are slow)"
+  run_case "slow max_rules=500 10m" "./rt_slow 500 enwik10m" fail
+  run_case "slow max_rules=5000 10m" "./rt_slow 5000 enwik10m" fail
+  run_case "slow max_rules=5000 100m" "./rt_slow 5000 enwik100m" fail
 fi
 
-# if [[ $SAVE_BLOBS -eq 1 ]] || [[ $MODE_ASAN -eq 1 ]]; then
-#   log "Saving compressed blobs for split decode tests"
-#   ./rt_save 6325 "${TMPDIR}/glza6325.bin"
-#   ./rt_save 6330 "${TMPDIR}/glza6330.bin"
-#   run_case "decode-only 6325" "./dec_only_mr '${TMPDIR}/glza6325.bin' 6325" 0
-#   run_case "decode-only 6330 (known bad)" "./dec_only_mr '${TMPDIR}/glza6330.bin' 6330" fail
-# fi
-# 
-# if [[ $MODE_ASAN -eq 1 ]]; then
-#   if [[ ! -f "${TMPDIR}/glza6330.bin" ]]; then
-#     log "ASAN: creating ${TMPDIR}/glza6330.bin"
-#     ./rt_save 6330 "${TMPDIR}/glza6330.bin"
-#   fi
-#   build_asan_decode
-#   log "ASAN decode-only on 6330 blob (halt on first error)"
-#   ASAN_OPTIONS=halt_on_error=1:detect_leaks=0 \
-#     run_case "asan dec 6330" "./dec_asan6400 '${TMPDIR}/glza6330.bin'" fail
-# fi
+if [[ $SAVE_BLOBS -eq 1 ]] || [[ $MODE_ASAN -eq 1 ]]; then
+  log "Saving compressed blobs for split decode tests"
+  ./rt_save 6325 "${TMPDIR}/glza6325.bin"
+  ./rt_save 6330 "${TMPDIR}/glza6330.bin"
+  run_case "decode-only 6325" "./dec_only_mr '${TMPDIR}/glza6325.bin' 6325" 0
+  run_case "decode-only 6330 (known bad)" "./dec_only_mr '${TMPDIR}/glza6330.bin' 6330" fail
+fi
+
+if [[ $MODE_ASAN -eq 1 ]]; then
+  if [[ ! -f "${TMPDIR}/glza6330.bin" ]]; then
+    log "ASAN: creating ${TMPDIR}/glza6330.bin"
+    ./rt_save 6330 "${TMPDIR}/glza6330.bin"
+  fi
+  if build_asan_decode; then
+    log "ASAN decode-only on 6330 blob (halt on first error)"
+    ASAN_OPTIONS=halt_on_error=1:detect_leaks=0 \
+      run_case "asan dec 6330" "./dec_asan6400 '${TMPDIR}/glza6330.bin'" fail
+  fi
+fi
 
 if [[ $MODE_FULL -eq 1 ]] && [[ -x ./rt_fast0 ]]; then
-  log "fast_mode=0 on enwik10m (slow; known grammar/decode bugs — see DEBUG_PLAN.md)"
+  log "fast_mode=0 author profile on enwik10m (rt_fast0)"
   run_case "fast_mode=0 full max_rules 10m" "./rt_fast0" fail
-  run_case "slow max_rules=500 10m (size mismatch)" "./rt_slow 500 enwik10m" fail
-  run_case "slow max_rules=5000 10m (decode fail)" "./rt_slow 5000 enwik10m" fail
 fi
  
 if [[ $MODE_FULL -eq 1 ]] && [[ -x ./rt_same6500 ]]; then

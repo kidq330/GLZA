@@ -26,6 +26,7 @@ limitations under the License.
 #include <string.h>
 #include "GLZA.h"
 #include "GLZAmodel.h"
+#include "GLZAfail.h"
 
 const uint32_t UNIQUE_SYMBOL = 0xFFFFFFFF;
 const uint32_t READ_SIZE = 0x80000;
@@ -667,6 +668,9 @@ uint8_t embed_define(uint32_t define_symbol, uint8_t in_definition) {
   uint8_t tag_type = 0;
   uint8_t saved_prior_is_cap = prior_is_cap;
 
+  if (ReadEncoderFailed() != 0)
+    return(0);
+
   define_symbol_instances = sd[define_symbol].count;
   if (define_symbol_instances != 1)
     new_symbol_code_length = sd[define_symbol].code_length;
@@ -963,10 +967,12 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   num_grammar_rules = 0;
   found_first_symbol = 0;
   use_mtf = 2;
+  params = GLZA_params_or_default(params);
   if (params != 0) {
     verbose = params->print_dictionary;
     use_mtf = params->use_mtf;
   }
+  ResetCodecGlobals();
   in_char_ptr = inbuf;
   end_char_ptr = inbuf + in_size;
   format = *in_char_ptr++;
@@ -2241,6 +2247,8 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
   }
 
   while (symbol_ptr < first_define_ptr) {
+    if (ReadEncoderFailed() != 0)
+      break;
     symbol = *symbol_ptr++;
     symbol_inst = sd[symbol].hits++;
     if (symbol_inst == 0) {
@@ -2318,6 +2326,11 @@ uint8_t GLZAencode(size_t in_size, uint8_t * inbuf, size_t * outsize_ptr, uint8_
     fprintf(stderr,
         "GLZA encode: encoder failed mid-stream (grammar_bytes=%u enc_buf_size=%zu OutCharNum=%u)\n",
         (unsigned int)grammar_size, enc_buf_size, (unsigned int)ReadOutCharNum());
+    GLZAfail_set("encode",
+                 "encoder failed mid-stream (grammar_bytes=%u enc_buf_size=%zu "
+                 "OutCharNum=%u; enc_buf heuristic is grammar*4+file+%u)",
+                 (unsigned int)grammar_size, enc_buf_size,
+                 (unsigned int)ReadOutCharNum(), 100000u);
     i = 0xFF;
     if (UTF8_compliant != 0)
       i = 0x90;

@@ -491,11 +491,15 @@ void InitBaseSymbolCap(uint8_t BaseSymbol, uint8_t * symbol_lengths) {
 }
 
 void IncreaseRange(uint32_t low_ranges, uint32_t ranges) {
+  if (EncoderFailed != 0)
+    return;
   low -= range * low_ranges;
   range *= ranges;
 }
 
 void DoubleRange(uint8_t low_ranges) {
+  if (EncoderFailed != 0)
+    return;
   low -= range * low_ranges;
   range *= 2;
 }
@@ -540,6 +544,12 @@ void ResetCodecGlobals(void) {
   DecoderFailed = 0;
 }
 
+#define NORMALIZE_ENCODER(bot) do { \
+  NormalizeEncoder(bot); \
+  if (EncoderFailed != 0) \
+    return; \
+} while (0)
+
 void NormalizeEncoder(uint32_t bot) {
   uint32_t normalize_steps = 0;
   while ((low ^ (low + range)) < TOP || (range < bot && ((range = -low & (bot - 1)), 1))) {
@@ -561,7 +571,7 @@ void NormalizeEncoder(uint32_t bot) {
 }
 
 void EncodeDictTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize) {
-  NormalizeEncoder(FREQ_SYM_TYPE_BOT1);
+  NORMALIZE_ENCODER(FREQ_SYM_TYPE_BOT1);
   uint32_t extra_range = range & (FREQ_SYM_TYPE_BOT1 - 1);
   if (QueueSize != 0)
     range = FreqSymTypePriorType[Context1][0] * (range >> 14) + extra_range;
@@ -574,7 +584,7 @@ void EncodeDictTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize
 }
 
 void EncodeDictType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16_t QueueSize) {
-  NormalizeEncoder(8 * FREQ_SYM_TYPE_BOT3);
+  NORMALIZE_ENCODER(8 * FREQ_SYM_TYPE_BOT3);
   uint32_t extra_range = range & (8 * FREQ_SYM_TYPE_BOT3 - 1);
   if (QueueSize != 0)
     range = (FreqSymTypePriorType[Context1][0] + FreqSymTypePriorType[Context2][0] + FreqSymTypePriorEnd[Context3][0]) * (range >> 15) + extra_range;
@@ -593,7 +603,7 @@ void EncodeDictType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16
 }
 
 void EncodeNewTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize) {
-  NormalizeEncoder(FREQ_SYM_TYPE_BOT1);
+  NORMALIZE_ENCODER(FREQ_SYM_TYPE_BOT1);
   uint32_t extra_range = range & (FREQ_SYM_TYPE_BOT1 - 1);
   uint16_t FreqMtf = FREQ_SYM_TYPE_BOT1 - FreqSymTypePriorType[Context1][0] - FreqSymTypePriorType[Context1][1];
   if (QueueSize != 0)
@@ -608,7 +618,7 @@ void EncodeNewTypeBinary(uint8_t Context1, uint8_t Context2, uint16_t QueueSize)
 }
 
 void EncodeNewType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16_t QueueSize) {
-  NormalizeEncoder(8 * FREQ_SYM_TYPE_BOT3);
+  NORMALIZE_ENCODER(8 * FREQ_SYM_TYPE_BOT3);
   uint32_t extra_range = range & (8 * FREQ_SYM_TYPE_BOT3 - 1);
   if (QueueSize != 0)
     low += (FreqSymTypePriorType[Context1][0] + FreqSymTypePriorType[Context2][0] + FreqSymTypePriorEnd[Context3][0]) * (range >>= 15) + extra_range;
@@ -628,7 +638,7 @@ void EncodeNewType(uint8_t Context1, uint8_t Context2, uint8_t Context3, uint16_
 }
 
 void EncodeMtfTypeBinary(uint8_t Context1, uint8_t Context2) {
-  NormalizeEncoder(FREQ_SYM_TYPE_BOT1);
+  NORMALIZE_ENCODER(FREQ_SYM_TYPE_BOT1);
   uint32_t extra_range = range & (FREQ_SYM_TYPE_BOT1 - 1);
   uint16_t delta = FreqSymTypePriorType[Context1][0] + FreqSymTypePriorType[Context1][1];
   low += delta * (range >>= 14) + extra_range;
@@ -639,7 +649,7 @@ void EncodeMtfTypeBinary(uint8_t Context1, uint8_t Context2) {
 }
 
 void EncodeMtfType(uint8_t Context1, uint8_t Context2, uint8_t Context3) {
-  NormalizeEncoder(8 * FREQ_SYM_TYPE_BOT3);
+  NORMALIZE_ENCODER(8 * FREQ_SYM_TYPE_BOT3);
   uint32_t extra_range = range & (8 * FREQ_SYM_TYPE_BOT3 - 1);
   uint16_t delta = FreqSymTypePriorType[Context1][0] + FreqSymTypePriorType[Context1][1]
       + FreqSymTypePriorType[Context2][0] + FreqSymTypePriorType[Context2][1]
@@ -657,7 +667,7 @@ void EncodeMtfType(uint8_t Context1, uint8_t Context2, uint8_t Context3) {
 
 void EncodeMtfFirst(uint8_t Context, uint8_t First, uint16_t QueueSizeOther, uint16_t QueueSizeSpace, uint16_t QueueSizeAz) {
   uint16_t delta;
-  NormalizeEncoder(0x1000);
+  NORMALIZE_ENCODER(0x1000);
   if (First == 0) {
     if (QueueSizeSpace == 0) {
       if (QueueSizeAz != 0) {
@@ -737,7 +747,7 @@ void EncodeMtfFirst(uint8_t Context, uint8_t First, uint16_t QueueSizeOther, uin
 void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
   if (!check_mtf_pos("EncodeMtfPos", position, QueueSize))
     return;
-  NormalizeEncoder(FREQ_MTF_POS_BOT);
+  NORMALIZE_ENCODER(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
@@ -801,7 +811,7 @@ void EncodeMtfPos(uint8_t position, uint16_t QueueSize) {
 void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
   if (!check_mtf_pos("EncodeMtfPosAz", position, QueueSize))
     return;
-  NormalizeEncoder(FREQ_MTF_POS_BOT);
+  NORMALIZE_ENCODER(FREQ_MTF_POS_BOT);
   if (last_queue_size_az > QueueSize)
     unused_queue_freq_az += FreqMtfPos[2][--last_queue_size_az];
   else if (last_queue_size_az < QueueSize) {
@@ -863,7 +873,7 @@ void EncodeMtfPosAz(uint8_t position, uint16_t QueueSize) {
 void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
   if (!check_mtf_pos("EncodeMtfPosSpace", position, QueueSize))
     return;
-  NormalizeEncoder(FREQ_MTF_POS_BOT);
+  NORMALIZE_ENCODER(FREQ_MTF_POS_BOT);
   if (last_queue_size_space > QueueSize)
     unused_queue_freq_space += FreqMtfPos[1][--last_queue_size_space];
   else if (last_queue_size_space < QueueSize) {
@@ -925,7 +935,7 @@ void EncodeMtfPosSpace(uint8_t position, uint16_t QueueSize) {
 void EncodeMtfPosOther(uint8_t position, uint16_t QueueSize) {
   if (!check_mtf_pos("EncodeMtfPosOther", position, QueueSize))
     return;
-  NormalizeEncoder(FREQ_MTF_POS_BOT);
+  NORMALIZE_ENCODER(FREQ_MTF_POS_BOT);
   if (last_queue_size_other > QueueSize)
     unused_queue_freq_other += FreqMtfPos[0][--last_queue_size_other];
   else if (last_queue_size_other < QueueSize) {
@@ -984,7 +994,7 @@ void EncodeMtfPosOther(uint8_t position, uint16_t QueueSize) {
 }
 
 void EncodeSID(uint8_t Context, uint8_t SIDSymbol) {
-  NormalizeEncoder(FREQ_SID_BOT);
+  NORMALIZE_ENCODER(FREQ_SID_BOT);
   if (SIDSymbol == 0) {
     range = FreqSID[Context][0] * (range / RangeScaleSID[Context]);
     FreqSID[Context][0] += UP_FREQ_SID;
@@ -1031,13 +1041,13 @@ void EncodeExtraSID(uint32_t ExtraSymbols) {
     range_multiplier =  1 << (6 - ((bits - 3) & 7));
     bits += 6 - ((bits - 3) & 7);
   }
-  NormalizeEncoder(1 << 9);
+  NORMALIZE_ENCODER(1 << 9);
   uint16_t count = (code >> (bits - 9)) & 0x1FF;
   range >>= 9;
   low += range * count;
   bits -= 9;
   while (bits != 0) {
-    NormalizeEncoder(1 << 8);
+    NORMALIZE_ENCODER(1 << 8);
     count = (code >> (bits - 8)) & 0xFF;
     range >>= 8;
     low += range * count;
@@ -1049,7 +1059,7 @@ void EncodeExtraSID(uint32_t ExtraSymbols) {
 }
 
 void EncodeINST(uint8_t Context, uint8_t SIDSymbol, uint8_t Symbol) {
-  NormalizeEncoder(FREQ_INST_BOT);
+  NORMALIZE_ENCODER(FREQ_INST_BOT);
   uint32_t extra_range = range;
   range /= RangeScaleINST[Context][SIDSymbol];
   extra_range -= range * RangeScaleINST[Context][SIDSymbol];
@@ -1083,7 +1093,7 @@ void EncodeINST(uint8_t Context, uint8_t SIDSymbol, uint8_t Symbol) {
 }
 
 void EncodeERG(uint16_t Context1, uint16_t Context2, uint8_t Symbol) {
-  NormalizeEncoder(FREQ_ERG_BOT);
+  NORMALIZE_ENCODER(FREQ_ERG_BOT);
   if (Symbol == 0) {
     range = (FreqERG[0] + FreqERG[Context1] + FreqERG[Context2]) * (range >> 13);
     FreqERG[0] += (0x400 - FreqERG[0]) >> 2;
@@ -1100,7 +1110,7 @@ void EncodeERG(uint16_t Context1, uint16_t Context2, uint8_t Symbol) {
 }
 
 void EncodeGoMtf(uint16_t Context1, uint8_t Context2, uint8_t Symbol) {
-  NormalizeEncoder(FREQ_GO_MTF_BOT);
+  NORMALIZE_ENCODER(FREQ_GO_MTF_BOT);
 uint32_t extra_range = range & (FREQ_GO_MTF_BOT - 1);
   Context1 += 0xF0 * Context2;
   uint16_t Context3 = Context1 + 0x2D0;
@@ -1120,7 +1130,7 @@ uint32_t extra_range = range & (FREQ_GO_MTF_BOT - 1);
 }
 
 void EncodeWordTag(uint8_t Symbol, uint8_t Context) {
-  NormalizeEncoder(FREQ_WORD_TAG_BOT);
+  NORMALIZE_ENCODER(FREQ_WORD_TAG_BOT);
   if (Symbol == 0) {
     range = FreqWordTag[Context] * (range >> 12);
     FreqWordTag[Context] += (0x1000 - FreqWordTag[Context]) >> 4;
@@ -1137,7 +1147,7 @@ void EncodeShortDictionarySymbol(uint16_t BinNum, uint16_t DictionaryBins, uint1
     DictionaryBins = 1;
   if (CodeBins == 0)
     CodeBins = 1;
-  NormalizeEncoder(1 << 12);
+  NORMALIZE_ENCODER(1 << 12);
   low += BinNum * (range /= DictionaryBins);
   range *= (uint32_t)CodeBins;
   return;
@@ -1145,16 +1155,16 @@ void EncodeShortDictionarySymbol(uint16_t BinNum, uint16_t DictionaryBins, uint1
 
 void EncodeLongDictionarySymbol(uint32_t BinCode, uint16_t BinNum, uint16_t DictionaryBins, uint8_t CodeLength,
     uint16_t CodeBins) {
-  NormalizeEncoder((uint32_t)1 << 12);
+  NORMALIZE_ENCODER((uint32_t)1 << 12);
   low += BinNum * (range /= DictionaryBins);
-  NormalizeEncoder((uint32_t)1 << CodeLength);
+  NORMALIZE_ENCODER((uint32_t)1 << CodeLength);
   low += BinCode * (range >>= CodeLength);
   range *= (uint32_t)CodeBins;
   return;
 }
 
 void EncodeBaseSymbol(uint32_t BaseSymbol, uint32_t NumBaseSymbols, uint32_t NormBaseSymbols) {
-  NormalizeEncoder(NormBaseSymbols);
+  NORMALIZE_ENCODER(NormBaseSymbols);
   low += BaseSymbol * (range /= NumBaseSymbols);
   return;
 }
@@ -1164,7 +1174,7 @@ void EncodeFirstChar(uint8_t FirstChar, uint8_t SymType, uint8_t LastChar) {
   uint32_t extra_range;
   struct first_char_data * FCDataPtr = &FirstCharData[SymType][LastChar][0];
 
-  NormalizeEncoder((uint32_t)FREQ_FIRST_CHAR_BOT);
+  NORMALIZE_ENCODER((uint32_t)FREQ_FIRST_CHAR_BOT);
   extra_range = range;
   RangeLow = 0;
   range /= *RangeScalePtr;
@@ -1208,7 +1218,7 @@ void EncodeFirstCharBinary(uint8_t FirstChar, uint8_t LastChar) {
   uint32_t extra_range;
   struct first_char_data * FCDataPtr;
 
-  NormalizeEncoder(FREQ_FIRST_CHAR_BOT);
+  NORMALIZE_ENCODER(FREQ_FIRST_CHAR_BOT);
   extra_range = range;
   RangeLow = 0;
   while ((SectionIndex != 7) && (FirstChar >= 0x20 * (SectionIndex + 1))) {

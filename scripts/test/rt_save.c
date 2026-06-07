@@ -8,7 +8,7 @@ int main(int argc, char **argv) {
   uint32_t max_rules = (uint32_t)strtoul(argv[1], 0, 0);
   const char *path = argv[2];
   struct param_data p = { max_rules, 0, 0, 0, 1, 1, 0, 0, 0, 2, 0, 0.0, 0.0, 0.0 };
-  FILE *f = fopen("../enwik10m", "rb");
+  FILE *f = fopen("enwik10m", "rb");
   fseek(f, 0, SEEK_END);
   size_t n = ftell(f);
   fseek(f, 0, SEEK_SET);

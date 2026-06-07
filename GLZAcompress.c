@@ -37,6 +37,7 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "GLZAfail.h"
 
 #define GLZA_DIE(msg)                                                          \
   do {                                                                         \
@@ -48,36 +49,27 @@ static uint8_t glza_warned_suffix_nodes;
 static uint8_t glza_warned_match_nodes;
 static uint8_t glza_warned_main_nodes;
 static uint8_t glza_warned_rank_buffer;
+static size_t glza_compress_RAM_bytes;
+
+static struct match_node *match_nodes_heap_buf;
+static uint32_t *match_strings_heap_buf;
+static size_t match_nodes_heap_slots;
+static size_t match_strings_heap_words;
+
+static struct {
+  uint32_t match_nodes_limit;
+  uint32_t num_match_nodes;
+  uint16_t num_candidates;
+  uint16_t candidate_index;
+  uint32_t max_match_length;
+  size_t arena_match_bytes;
+} glza_match_limit_ctx;
 
 static void glza_warn_once(uint8_t *flag, const char *message) {
   if (*flag == 0) {
     *flag = 1;
     fputs(message, stderr);
   }
-}
-
-static void glza_warn_suffix_nodes_limit(void) {
-  glza_warn_once(&glza_warned_suffix_nodes,
-                 "GLZA compress: suffix tree node limit reached "
-                 "(increase RAM or reduce input)\n");
-}
-
-static void glza_warn_match_nodes_limit(void) {
-  glza_warn_once(&glza_warned_match_nodes,
-                 "GLZA compress: match prefix-tree node limit reached "
-                 "(increase RAM or reduce candidates)\n");
-}
-
-static void glza_warn_main_nodes_limit(void) {
-  glza_warn_once(&glza_warned_main_nodes,
-                 "GLZA compress: suffix tree build stopped at node budget "
-                 "(increase RAM)\n");
-}
-
-static void glza_warn_rank_buffer_limit(void) {
-  glza_warn_once(&glza_warned_rank_buffer,
-                 "GLZA compress: rank-scores buffer full (candidate cap "
-                 "reached)\n");
 }
 
 const uint32_t MAX_WRITE_SIZE = 0x200000;
@@ -180,6 +172,200 @@ struct match_node {
   struct match_node *miss_ptr;
   struct match_node *hit_ptr;
 };
+
+static void glza_free_match_heap_bufs(void) {
+  free(match_nodes_heap_buf);
+  free(match_strings_heap_buf);
+  match_nodes_heap_buf = 0;
+  match_strings_heap_buf = 0;
+  match_nodes_heap_slots = 0;
+  match_strings_heap_words = 0;
+}
+
+static int glza_ensure_match_heap(uint32_t min_node_slots,
+                                  uint32_t match_string_words) {
+  if (min_node_slots < 4096) {
+    min_node_slots = 4096;
+  }
+  if (match_string_words < 4096) {
+    match_string_words = 4096;
+  }
+  if (match_nodes_heap_slots < min_node_slots) {
+    struct match_node *p = (struct match_node *)realloc(
+        match_nodes_heap_buf, (size_t)min_node_slots * sizeof(struct match_node));
+    if (p == 0) {
+      return(0);
+    }
+    match_nodes_heap_buf = p;
+    match_nodes_heap_slots = min_node_slots;
+  }
+  if (match_strings_heap_words < match_string_words) {
+    uint32_t *p = (uint32_t *)realloc(
+        match_strings_heap_buf, (size_t)match_string_words * sizeof(uint32_t));
+    if (p == 0) {
+      return(0);
+    }
+    match_strings_heap_buf = p;
+    match_strings_heap_words = match_string_words;
+  }
+  return(1);
+}
+
+static void glza_note_match_limit(uint32_t match_nodes_limit, uint32_t num_match_nodes,
+                                  uint16_t num_candidates, uint16_t candidate_index,
+                                  uint32_t max_match_length, size_t arena_match_bytes) {
+  glza_match_limit_ctx.match_nodes_limit = match_nodes_limit;
+  glza_match_limit_ctx.num_match_nodes = num_match_nodes;
+  glza_match_limit_ctx.num_candidates = num_candidates;
+  glza_match_limit_ctx.candidate_index = candidate_index;
+  glza_match_limit_ctx.max_match_length = max_match_length;
+  glza_match_limit_ctx.arena_match_bytes = arena_match_bytes;
+}
+
+static void glza_bind_match_storage(struct match_node **out_match_nodes,
+                                    uint32_t *out_match_nodes_limit,
+                                    uint32_t **out_match_strings,
+                                    uint8_t *free_RAM_ptr,
+                                    uintptr_t match_region_end_limit,
+                                    uint32_t child_ptr_count,
+                                    uint16_t num_candidates,
+                                    uint32_t max_match_length,
+                                    uint32_t est_match_nodes) {
+  uintptr_t arena_match_nodes =
+      (uintptr_t)free_RAM_ptr +
+      (uintptr_t)child_ptr_count * sizeof(struct match_node *);
+  size_t arena_bytes = match_region_end_limit > arena_match_nodes
+                           ? match_region_end_limit - arena_match_nodes
+                           : 0;
+  uint32_t arena_slots =
+      (uint32_t)(arena_bytes / sizeof(struct match_node));
+  size_t grammar_bytes =
+      (size_t)(end_symbol_ptr - start_symbol_ptr) * sizeof(uint32_t);
+  size_t need_str_words =
+      (size_t)num_candidates * (size_t)(max_match_length != 0 ? max_match_length : 1);
+  size_t need_bytes = (size_t)est_match_nodes * sizeof(struct match_node) +
+                        need_str_words * sizeof(uint32_t);
+
+  if (arena_slots >= est_match_nodes && arena_bytes >= need_bytes) {
+    *out_match_nodes = (struct match_node *)arena_match_nodes;
+    *out_match_nodes_limit = arena_slots;
+    *out_match_strings =
+        (uint32_t *)((uintptr_t)arena_match_nodes +
+                     (size_t)est_match_nodes * sizeof(struct match_node));
+    return;
+  }
+
+  uint32_t heap_slots = est_match_nodes + (uint32_t)num_candidates * 8u + 4096u;
+  uint32_t heap_words = (uint32_t)need_str_words + 4096u;
+  if (glza_ensure_match_heap(heap_slots, heap_words) == 0) {
+    fprintf(stderr,
+            "GLZA compress: match prefix-tree heap alloc failed "
+            "(need_node_slots=%u need_str_words=%u arena_match_bytes=%zu "
+            "grammar_stream_bytes=%zu compress_RAM=%zu)\n",
+            (unsigned int)heap_slots, (unsigned int)heap_words,
+            arena_bytes, grammar_bytes, glza_compress_RAM_bytes);
+    GLZAfail_set("compress",
+                 "match prefix-tree heap alloc failed (need_node_slots=%u "
+                 "need_str_words=%u arena_match_bytes=%zu compress_RAM=%zu)",
+                 (unsigned int)heap_slots, (unsigned int)heap_words,
+                 arena_bytes, glza_compress_RAM_bytes);
+    *out_match_nodes = (struct match_node *)arena_match_nodes;
+    *out_match_nodes_limit = arena_slots;
+    *out_match_strings = (uint32_t *)((uintptr_t)arena_match_nodes +
+                                      sizeof(struct match_node));
+    return;
+  }
+
+  fprintf(stderr,
+          "GLZA compress: match prefix-tree using heap fallback "
+          "(arena_match_bytes=%zu est_nodes=%u candidates=%u max_match_len=%u "
+          "grammar_stream_bytes=%zu compress_RAM=%zu)\n",
+          arena_bytes, (unsigned int)est_match_nodes,
+          (unsigned int)num_candidates, (unsigned int)max_match_length,
+          grammar_bytes, glza_compress_RAM_bytes);
+  *out_match_nodes = match_nodes_heap_buf;
+  *out_match_nodes_limit = (uint32_t)match_nodes_heap_slots;
+  *out_match_strings = match_strings_heap_buf;
+}
+
+static void glza_warn_suffix_nodes_limit(uint32_t nodes_num_limit,
+                                         uint32_t next_node_num) {
+  glza_warn_once(&glza_warned_suffix_nodes,
+                 "GLZA compress: suffix tree node limit reached "
+                 "(increase RAM or reduce input)\n");
+  fprintf(stderr,
+          "GLZA compress: suffix tree node budget exhausted "
+          "(nodes_num_limit=%u next_node_num=%u compress_RAM=%zu). "
+          "Try GLZA_RAM_MB=<megabytes> or reduce max_rules/input size.\n",
+          (unsigned int)nodes_num_limit, (unsigned int)next_node_num,
+          glza_compress_RAM_bytes);
+  GLZAfail_set("compress",
+               "suffix tree node limit (nodes_num_limit=%u next_node_num=%u "
+               "compress_RAM=%zu)",
+               (unsigned int)nodes_num_limit, (unsigned int)next_node_num,
+               glza_compress_RAM_bytes);
+}
+
+static void glza_warn_match_nodes_limit(void) {
+  glza_warn_once(&glza_warned_match_nodes,
+                 "GLZA compress: match prefix-tree node limit reached "
+                 "(increase RAM or reduce candidates)\n");
+  fprintf(stderr,
+          "GLZA compress: match prefix-tree limit "
+          "(match_nodes_limit=%u num_match_nodes=%u candidate=%u/%u "
+          "max_match_len=%u arena_match_bytes=%zu grammar_stream_bytes=%zu "
+          "compress_RAM=%zu). Arena between grammar end and suffix-tree nodes "
+          "was too small even after heap fallback; try GLZA_RAM_MB=<megabytes> "
+          "or lower max_rules.\n",
+          (unsigned int)glza_match_limit_ctx.match_nodes_limit,
+          (unsigned int)glza_match_limit_ctx.num_match_nodes,
+          (unsigned int)glza_match_limit_ctx.candidate_index,
+          (unsigned int)glza_match_limit_ctx.num_candidates,
+          (unsigned int)glza_match_limit_ctx.max_match_length,
+          glza_match_limit_ctx.arena_match_bytes,
+          (size_t)(end_symbol_ptr - start_symbol_ptr) * sizeof(uint32_t),
+          glza_compress_RAM_bytes);
+  GLZAfail_set("compress",
+               "match prefix-tree limit (match_nodes_limit=%u "
+               "num_match_nodes=%u candidate=%u/%u arena_match_bytes=%zu "
+               "compress_RAM=%zu)",
+               (unsigned int)glza_match_limit_ctx.match_nodes_limit,
+               (unsigned int)glza_match_limit_ctx.num_match_nodes,
+               (unsigned int)glza_match_limit_ctx.candidate_index,
+               (unsigned int)glza_match_limit_ctx.num_candidates,
+               glza_match_limit_ctx.arena_match_bytes,
+               glza_compress_RAM_bytes);
+}
+
+static void glza_warn_main_nodes_limit(uint32_t main_nodes_limit,
+                                       uint32_t next_node_num) {
+  glza_warn_once(&glza_warned_main_nodes,
+                 "GLZA compress: suffix tree build stopped at node budget "
+                 "(increase RAM)\n");
+  fprintf(stderr,
+          "GLZA compress: parallel suffix-tree node budget hit "
+          "(main_nodes_limit=%u next_node_num=%u compress_RAM=%zu). "
+          "Try GLZA_RAM_MB=<megabytes> or reduce max_rules.\n",
+          (unsigned int)main_nodes_limit, (unsigned int)next_node_num,
+          glza_compress_RAM_bytes);
+  GLZAfail_set("compress",
+               "parallel suffix-tree node budget (main_nodes_limit=%u "
+               "next_node_num=%u compress_RAM=%zu)",
+               (unsigned int)main_nodes_limit, (unsigned int)next_node_num,
+               glza_compress_RAM_bytes);
+}
+
+static void glza_warn_rank_buffer_limit(uint16_t max_scores) {
+  glza_warn_once(&glza_warned_rank_buffer,
+                 "GLZA compress: rank-scores buffer full (candidate cap "
+                 "reached)\n");
+  fprintf(stderr,
+          "GLZA compress: rank-scores buffer full (max_scores=%u). "
+          "Internal candidate cap reached — reduce max_rules or input size.\n",
+          (unsigned int)max_scores);
+  GLZAfail_set("compress", "rank-scores buffer full (max_scores=%u)",
+               (unsigned int)max_scores);
+}
 
 struct tree_thread_data {
   uint32_t *start_cycle_symbol_ptr;
@@ -482,7 +668,7 @@ static struct node *create_suffix_node(uint32_t suffix_symbol,
   // __jm__ does this create a node for `suffix_symbol` connected to the
   // "implicit" root of the GST?
   if (*next_node_num_ptr >= nodes_num_limit) {
-    glza_warn_suffix_nodes_limit();
+    glza_warn_suffix_nodes_limit(nodes_num_limit, *next_node_num_ptr);
     return NULL;
   }
   struct node *node_ptr = &nodes[(*next_node_num_ptr)++];
@@ -501,7 +687,7 @@ static struct node *split_node_for_overlap(struct node *node_ptr,
                                            uint32_t in_symbol_index,
                                            uint32_t *next_node_num_ptr) {
   if (*next_node_num_ptr >= nodes_num_limit) {
-    glza_warn_suffix_nodes_limit();
+    glza_warn_suffix_nodes_limit(nodes_num_limit, *next_node_num_ptr);
     return NULL;
   }
   uint32_t non_overlap_length = split_index - node_ptr->last_match_index;
@@ -605,7 +791,7 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
   // found a matching sibling
   uint32_t *first_symbol_ptr = in_symbol_ptr - 1;
   uint32_t *max_word_ptr = end_symbol_ptr - 1;
-  if (first_symbol_ptr + MAX_MATCH_LENGTH - 1 < max_word_ptr) {
+  if (max_word_ptr > first_symbol_ptr + MAX_MATCH_LENGTH - 1) {
     max_word_ptr = first_symbol_ptr + MAX_MATCH_LENGTH - 1;
   }
   while (node_ptr->child_node_num != 0) {
@@ -630,7 +816,7 @@ static void add_word_suffix(uint32_t *in_symbol_ptr,
         if (*(node_symbol_ptr + length) !=
             *(in_symbol_ptr + length)) { // insert node in branch
           if (*next_node_num_ptr + 1 >= nodes_num_limit) {
-            glza_warn_suffix_nodes_limit();
+            glza_warn_suffix_nodes_limit(nodes_num_limit, *next_node_num_ptr);
             return;
           }
           struct node *new_node_ptr = &nodes[*next_node_num_ptr];
@@ -1014,7 +1200,7 @@ static void *build_tree_thread(void *arg) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
           pthread_mutex_unlock(&suffix_tree_mutex);
           if (next_node_num >= node_num_limit) {
-            glza_warn_main_nodes_limit();
+            glza_warn_main_nodes_limit(node_num_limit, next_node_num);
             return 0;
           }
         }
@@ -1048,7 +1234,7 @@ static void *word_build_tree_thread(void *arg) {
               thread_data_ptr->start_positions[local_read_index & 0xFF],
           &next_node_num);
       if (next_node_num >= nodes_limit) {
-        glza_warn_main_nodes_limit();
+        glza_warn_main_nodes_limit(nodes_limit, next_node_num);
         return 0;
       }
       atomic_store_explicit(&thread_data_ptr->read_index, ++local_read_index,
@@ -2578,7 +2764,7 @@ static void score_base_node_tree_words(
             float score = (repeats * profit_per_substitution) - production_cost;
             if (score > min_score) {
               if (node_ptrs_num >= 0xFFFE) {
-                glza_warn_rank_buffer_limit();
+                glza_warn_rank_buffer_limit(0xFFFE);
                 goto score_siblings;
               }
               if ((node_ptrs_num & 0xFFF) == 0) {
@@ -3510,8 +3696,8 @@ static void scan_mode0(
   }
 
   uint16_t node_ptrs_num = 0;
-  rank_scores_write_index = 0;
-  rank_scores_read_index = 0;
+  atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
+  atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
   rank_scores_data_ptr->max_scores = max_scores;
   pthread_create(p_rank_scores_thread1, NULL, rank_word_scores_thread,
                  (void *)rank_scores_data_ptr);
@@ -3581,10 +3767,6 @@ static void scan_mode0(
     substitute_thread_data.symbol_counts = symbol_counts;
     substitute_thread_data.substitute_data = substitute_data;
     child_ptr_array = (struct match_node **)free_RAM_ptr;
-    struct match_node *match_nodes =
-        (struct match_node *)(free_RAM_ptr + sizeof(struct match_node *));
-
-    // __jm__ simplify with lambda
     uintptr_t match_region_end_limit = end_RAM_ptr;
     if (use_substitute_heap != 0) {
       match_region_end_limit =
@@ -3593,45 +3775,64 @@ static void scan_mode0(
       match_region_end_limit = (uintptr_t)nodes;
     }
 
-    uint32_t match_nodes_limit =
-        (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes) /
-                   sizeof(struct match_node)); /* derived bound; num_match_nodes
-                                                  checked against this */
-    uint32_t num_match_nodes = 1;
+    uint32_t est_match_nodes = 1;
     uint32_t max_match_length = 0;
     {
       size_t candidate_num = 0;
       while (candidate_num < num_candidates) {
-        if (candidates[candidates_index[candidate_num]].num_symbols >
-            max_match_length) {
-          max_match_length =
-              candidates[candidates_index[candidate_num]].num_symbols;
-        }
         if (candidates[candidates_index[candidate_num]].score < min_score) {
-          num_candidates = candidate_num;
-        }
-        num_match_nodes +=
-            candidates[candidates_index[candidate_num]].num_symbols - 1;
-        if ((size_t)match_nodes +
-                (num_match_nodes * sizeof(struct match_node)) +
-                (4 * max_match_length) >=
-            match_region_end_limit) {
-          glza_warn_match_nodes_limit();
-          num_candidates = candidate_num != 0 ? candidate_num - 1 : 0;
+          num_candidates = (uint16_t)candidate_num;
           break;
+        }
+        uint32_t ns = candidates[candidates_index[candidate_num]].num_symbols;
+        if (ns > max_match_length) {
+          max_match_length = ns;
+        }
+        if (ns > 0) {
+          est_match_nodes += ns - 1;
         }
         candidate_num++;
       }
     }
-    uint32_t *match_strings =
-        (uint32_t *)((size_t)match_nodes +
-                     ((size_t)num_match_nodes * sizeof(struct match_node)));
-    struct overlap_check *overlap_check_data =
-        (struct overlap_check
-             *)(((uintptr_t)&match_strings[num_candidates * max_match_length] +
-                 7) &
-                ~7);
+    struct match_node *match_nodes;
+    uint32_t match_nodes_limit;
+    uint32_t *match_strings;
+    glza_bind_match_storage(&match_nodes, &match_nodes_limit, &match_strings,
+                            free_RAM_ptr, match_region_end_limit, 1,
+                            num_candidates, max_match_length, est_match_nodes);
+    uint32_t num_match_nodes = 1;
     struct overlap_check *overlap_check_heap_buf = *ptr_overlap_check_heap_buf;
+    struct overlap_check *overlap_check_data;
+    if (match_strings == match_strings_heap_buf) {
+      if (overlap_check_heap_buf == NULL) {
+        overlap_check_heap_buf =
+            (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
+        if (overlap_check_heap_buf == NULL) {
+          fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
+          exit(1);
+        }
+      }
+      overlap_check_data = overlap_check_heap_buf;
+    } else {
+      overlap_check_data =
+          (struct overlap_check *)(((uintptr_t)
+                                        &match_strings[num_candidates *
+                                                        max_match_length] +
+                                    7) &
+                                   ~7);
+      if ((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)) >
+          match_region_end_limit) {
+        if (overlap_check_heap_buf == NULL) {
+          overlap_check_heap_buf =
+              (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
+          if (overlap_check_heap_buf == NULL) {
+            fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
+            exit(1);
+          }
+        }
+        overlap_check_data = overlap_check_heap_buf;
+      }
+    }
     uint8_t *candidate_bad = *ptr_candidate_bad;
     uint16_t num_candidates_processed = 0;
     uint32_t num_rules = *ptr_num_rules;
@@ -3663,18 +3864,6 @@ static void scan_mode0(
         }
         candidate_num++;
       }
-    }
-    if ((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)) >
-        match_region_end_limit) {
-      if (overlap_check_heap_buf == NULL) {
-        overlap_check_heap_buf =
-            (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
-        if (overlap_check_heap_buf == NULL) {
-          fprintf(stderr, "ERROR - overlap_check memory allocation failed\n");
-          exit(1);
-        }
-      }
-      overlap_check_data = overlap_check_heap_buf;
     }
     for (size_t i = 1; i < 8; i++) {
       overlap_check_data[i].candidate_bad = &candidate_bad[0];
@@ -3708,6 +3897,13 @@ static void scan_mode0(
               uint32_t symbol = *best_score_match_ptr;
               if (match_node_ptr->child_ptr == 0) {
                 if (num_match_nodes >= match_nodes_limit) {
+                  glza_note_match_limit(match_nodes_limit, num_match_nodes,
+                                        num_candidates, (uint16_t)candidate_num,
+                                        max_match_length,
+                                        match_region_end_limit > (uintptr_t)match_nodes
+                                            ? match_region_end_limit -
+                                                  (uintptr_t)match_nodes
+                                            : 0);
                   glza_warn_match_nodes_limit();
                   candidate_bad[candidate_num] = 1;
                   break;
@@ -3725,6 +3921,13 @@ static void scan_mode0(
                   }
                 } else {
                   if (num_match_nodes >= match_nodes_limit) {
+                    glza_note_match_limit(match_nodes_limit, num_match_nodes,
+                                          num_candidates, (uint16_t)candidate_num,
+                                          max_match_length,
+                                          match_region_end_limit > (uintptr_t)match_nodes
+                                              ? match_region_end_limit -
+                                                    (uintptr_t)match_nodes
+                                              : 0);
                     glza_warn_match_nodes_limit();
                     candidate_bad[candidate_num] = 1;
                     break;
@@ -3837,8 +4040,8 @@ static void scan_mode0(
       substitute_thread_data.in_symbol_ptr = start_symbol_ptr;
       substitute_thread_data.max_rule_symbol =
           (j > next_new_symbol_number) ? (j - 1) : (next_new_symbol_number - 1);
-      substitute_data_write_index = 0;
-      substitute_data_read_index = 0;
+      atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
+      atomic_store_explicit(&substitute_data_read_index, 0, memory_order_relaxed);
       pthread_create(&substitute_thread1, NULL, substitute_thread,
                      (void *)&substitute_thread_data);
 
@@ -4277,8 +4480,9 @@ static void build_and_score_suffix_tree(
                    thread_nodes_limit, num_rules, next_new_symbol_number,
                    tree_thread_data, start_cycle_symbol_ptr);
 
-    scan_symbol_ptr = (uintptr_t)in_symbol_ptr;
-    max_symbol_ptr = 0;
+    atomic_store_explicit(&scan_symbol_ptr, (uintptr_t)in_symbol_ptr,
+                          memory_order_relaxed);
+    atomic_store_explicit(&max_symbol_ptr, 0, memory_order_relaxed);
     for (size_t j = 0; j < 6; j++) {
       pthread_create(&build_tree_threads[j], NULL, build_tree_thread,
                      (void *)&tree_thread_data[j]);
@@ -4336,7 +4540,7 @@ static void build_and_score_suffix_tree(
         if ((int32_t)*in_symbol_ptr >= 0) {
           add_suffix(symbol, in_symbol_ptr, &next_node_num);
           if (next_node_num >= main_nodes_limit) {
-            glza_warn_main_nodes_limit();
+            glza_warn_main_nodes_limit(main_nodes_limit, next_node_num);
             goto done_building_tree_tree;
           }
         }
@@ -4403,7 +4607,7 @@ static void build_and_score_suffix_tree(
       if (symbol <= main_max_symbol && (int32_t)*in_symbol_ptr >= 0) {
         add_suffix(symbol, in_symbol_ptr, &next_node_num);
         if (next_node_num >= main_nodes_limit) {
-          glza_warn_main_nodes_limit();
+          glza_warn_main_nodes_limit(main_nodes_limit, next_node_num);
           break;
         }
       }
@@ -4550,6 +4754,8 @@ static void process_ranked_candidates(
   uint32_t prior_match_score_number[MAX_PRIOR_MATCHES];
   uint32_t *prior_match_end_ptr[MAX_PRIOR_MATCHES];
   struct match_node *match_node_ptr;
+  struct match_node *match_nodes;
+  uint32_t match_nodes_limit;
   uint8_t *free_RAM_ptr;
   uint32_t *stop_matches_symbol_ptr[8];
 
@@ -4643,26 +4849,29 @@ static void process_ranked_candidates(
 
   // build a prefix tree of the match strings
   child_ptr_array = (struct match_node **)free_RAM_ptr;
-  struct match_node *match_nodes =
-      (struct match_node *)(free_RAM_ptr + (sizeof(struct match_node *) *
-                                            next_new_symbol_number));
-  uint32_t match_nodes_limit =
-      (uint32_t)((match_region_end_limit - (uintptr_t)match_nodes) /
-                 sizeof(struct match_node));
+  {
+    uint32_t est_match_nodes = 1;
+    uint32_t est_max_len = 0;
+    uint16_t i;
+    for (i = 0; i < num_candidates; i++) {
+      uint32_t ns = candidates[i].num_symbols;
+      if (ns > est_max_len) {
+        est_max_len = ns;
+      }
+      if (ns > 0) {
+        est_match_nodes += ns - 1;
+      }
+    }
+    glza_bind_match_storage(&match_nodes, &match_nodes_limit, &match_strings,
+                            free_RAM_ptr, match_region_end_limit,
+                            next_new_symbol_number, num_candidates, est_max_len,
+                            est_match_nodes);
+  }
   num_match_nodes = 0;
   max_match_length = 0;
   {
     uint16_t candidate_num = 0;
     while (candidate_num < num_candidates) {
-      if ((uintptr_t)match_nodes +
-              ((num_match_nodes + 1) * sizeof(struct match_node)) +
-              ((uintptr_t)(candidate_num + 1) * max_match_length *
-               sizeof(uint32_t)) >=
-          match_region_end_limit) {
-        glza_warn_match_nodes_limit();
-        num_candidates = candidate_num != 0 ? candidate_num - 1 : 0;
-        break;
-      }
       uint32_t *best_score_last_match_ptr;
       uint32_t *best_score_match_ptr;
       if (candidates[candidate_num].num_symbols > max_match_length) {
@@ -4681,6 +4890,11 @@ static void process_ranked_candidates(
         symbol = *best_score_match_ptr;
         if (match_node_ptr->child_ptr == 0) {
           if (num_match_nodes >= match_nodes_limit) {
+            glza_note_match_limit(match_nodes_limit, num_match_nodes,
+                                  num_candidates, candidate_num, max_match_length,
+                                  match_region_end_limit > (uintptr_t)match_nodes
+                                      ? match_region_end_limit - (uintptr_t)match_nodes
+                                      : 0);
             glza_warn_match_nodes_limit();
             candidate_bad[candidate_num] = 1;
             break;
@@ -4699,6 +4913,11 @@ static void process_ranked_candidates(
             }
           } else {
             if (num_match_nodes >= match_nodes_limit) {
+              glza_note_match_limit(match_nodes_limit, num_match_nodes,
+                                    num_candidates, candidate_num, max_match_length,
+                                    match_region_end_limit > (uintptr_t)match_nodes
+                                        ? match_region_end_limit - (uintptr_t)match_nodes
+                                        : 0);
               glza_warn_match_nodes_limit();
               candidate_bad[candidate_num] = 1;
               break;
@@ -4889,16 +5108,19 @@ static void process_ranked_candidates(
 
   // save the match strings so they can be added to the end of the data after
   // symbol substitution is done
-  match_strings =
-      (uint32_t *)((size_t)match_nodes +
-                   ((size_t)num_match_nodes * sizeof(struct match_node)));
+  if (match_strings != match_strings_heap_buf) {
+    match_strings =
+        (uint32_t *)((size_t)match_nodes +
+                     ((size_t)num_match_nodes * sizeof(struct match_node)));
+  }
   overlap_check_data =
       (struct overlap_check
            *)(((uintptr_t)&match_strings[num_candidates * max_match_length] +
                7) &
               ~7);
   if ((uintptr_t)overlap_check_data + (8 * sizeof(struct overlap_check)) >
-      match_region_end_limit) {
+          match_region_end_limit ||
+      match_strings == match_strings_heap_buf) {
     if (overlap_check_heap_buf == 0) {
       overlap_check_heap_buf =
           (struct overlap_check *)malloc(8 * sizeof(struct overlap_check));
@@ -4937,7 +5159,16 @@ static void process_ranked_candidates(
       ((uintptr_t)&match_strings[num_candidates * max_match_length] + 7) & ~7;
   uint32_t *begin_matches;
   uint32_t *matches_end_ptr;
-  if (overlap_check_data == overlap_check_heap_buf) {
+  if (match_strings == match_strings_heap_buf) {
+    /* match_nodes/strings live on the heap; keep overlap-match buffers in the
+     * arena after child_ptr_array (same slot match_nodes used to occupy). */
+    begin_matches = (uint32_t *)((((uintptr_t)free_RAM_ptr +
+                                    (uintptr_t)child_ptr_array_size *
+                                        sizeof(struct match_node *)) +
+                                   7) &
+                                  ~7);
+    matches_end_ptr = (uint32_t *)match_region_end_limit;
+  } else if (overlap_check_data == overlap_check_heap_buf) {
     begin_matches = (uint32_t *)match_strings_end;
     matches_end_ptr = (uint32_t *)match_region_end_limit;
   } else {
@@ -5845,6 +6076,7 @@ static void main_loop(uint32_t *p_num_rules, enum glza_scan_mode scan_mode,
   free(substitute_heap_buf);
   free(find_substitutions_thread_data_buf);
   free(overlap_check_heap_buf);
+  glza_free_match_heap_bufs();
 }
 
 uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
@@ -5857,6 +6089,12 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
   start_symbol_ptr = 0;
   symbol_counts = 0;
   score_map = 0;
+  glza_warned_suffix_nodes = 0;
+  glza_warned_match_nodes = 0;
+  glza_warned_main_nodes = 0;
+  glza_warned_rank_buffer = 0;
+  glza_free_match_heap_bufs();
+  glza_compress_RAM_bytes = 0;
   atomic_store_explicit(&rank_scores_write_index, 0, memory_order_relaxed);
   atomic_store_explicit(&rank_scores_read_index, 0, memory_order_relaxed);
   atomic_store_explicit(&substitute_data_write_index, 0, memory_order_relaxed);
@@ -5970,6 +6208,7 @@ uint8_t GLZAcompress(size_t in_size, size_t *outsize_ptr, uint8_t **iobuf,
   }
   uint8_t *end_RAM_ptr = (uint8_t *)start_symbol_ptr +
                          available_RAM; /* one-past-end of grammar arena */
+  glza_compress_RAM_bytes = (size_t)available_RAM;
 
   // parse the file to determine UTF8_compliant
   uint32_t *in_symbol_ptr =
