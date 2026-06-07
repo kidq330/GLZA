@@ -1,6 +1,26 @@
 # source: https://gist.github.com/fbaeuerlein/2895f889e451a817d7b2b36fd60e2873
 ---
-Checks:          'clang-diagnostic-*,clang-analyzer-*,cppcoreguidelines-*,modernize-*,-modernize-use-trailing-return-type,readability-*,performance-*'
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  readability-*,
+  performance-*,
+  misc-*,
+  -misc-use-anonymous-namespace,
+  -misc-no-recursion,
+  -readability-use-std-min-max,
+  -readability-implicit-bool-conversion,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-magic-numbers,
+  -modernize-avoid-c-arrays,
+  -modernize-deprecated-headers,
+  -modernize-use-auto,
+  -modernize-use-nullptr,
+  -modernize-use-bool-literals,
+  -modernize-loop-convert,
 WarningsAsErrors: true
 HeaderFilterRegex: ''
 FormatStyle:     google
