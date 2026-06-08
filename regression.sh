@@ -22,7 +22,7 @@ cd "$SCRIPT_DIR"
 
 CLANG="${GLZA_CLANG:-/usr/bin/clang}"
 TMPDIR="${GLZA_TMP:-/tmp}"
-CFLAGS="-O3 -D_FILE_OFFSET_BITS=64 -I."
+CFLAGS="-O3 -DPRINTON -D_FILE_OFFSET_BITS=64 -I."
 ASAN_CFLAGS="-O1 -g -fsanitize=address -D_FILE_OFFSET_BITS=64 -I."
 
 MODE_QUICK=1
@@ -185,7 +185,7 @@ run_case "max_rules=6000 10m" "./rt_large 6000 enwik10m" 0
 run_case "max_rules=6325 10m" "./rt_large 6325 enwik10m" 0
 
 run_case "max_rules=6330 1m" "./rt_large 6330 enwik1m" 0
-run_case "max_rules=6330 10m (known bad)" "./rt_large 6330 enwik10m" fail
+run_case "max_rules=6330 10m" "./rt_large 6330 enwik10m" 0
 
 log "fast_mode=0 roundtrip on enwik1m (rt_slow)"
 run_case "slow max_rules=500 1m" "./rt_slow 500 enwik1m" 0
