@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
   fseek(f, 0, SEEK_END);
   size_t sz = ftell(f);
   fseek(f, 0, SEEK_SET);
-  uint8_t *in = malloc(sz), *dec = malloc(20*1024*1024);
+  uint8_t *in = (uint8_t*)malloc(sz), *dec = (uint8_t*)malloc(20*1024*1024);
   fread(in, 1, sz, f);
   fclose(f);
   size_t ds = 20*1024*1024;

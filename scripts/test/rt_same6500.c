@@ -10,7 +10,7 @@ int main(void) {
   fseek(f, 0, SEEK_END);
   size_t n = ftell(f);
   fseek(f, 0, SEEK_SET);
-  uint8_t *in = malloc(n), *out = malloc(n + 16*1024*1024), *dec = malloc(n);
+  uint8_t *in = (uint8_t*)malloc(n), *out = (uint8_t*)malloc(n + 16*1024*1024), *dec = (uint8_t*)malloc(n);
   fread(in, 1, n, f);
   fclose(f);
   size_t sz = 0;

@@ -1349,7 +1349,7 @@ void Compressor::score_base_node_tree(
   double string_entropy = symbol_entropy[prior_symbol];
   const double first_symbol_entropy = string_entropy;
   double string_profit =
-      symbol_counts_[prior_symbol] < kNumPrecalcXLog2X
+      symbol_counts_[prior_symbol] < x_log2_x_.size()
           ? -x_log2_x_[symbol_counts_[prior_symbol]] - new_rule_cost_
           : xlogx(symbol_counts_[prior_symbol]) - new_rule_cost_;
   if ((node_ptr->instances == symbol_counts_[prior_symbol]) &&
@@ -1368,14 +1368,14 @@ void Compressor::score_base_node_tree(
       }
       const uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       const double repeats = static_cast<double>(node_instances - 1);
-      double bits_saved = node_instances <= kNumPrecalcXLog2X
+      double bits_saved = node_instances <= x_log2_x_.size()
                               ? x_log2_x_[node_instances - 1]
                               : xlogx(repeats);
       uint32_t* symbol_ptr =
           start_symbol_ptr_ + node_ptr->last_match_index - num_symbols + 1;
       do {
         instances = symbol_counts_[*symbol_ptr];
-        bits_saved += instances - node_instances + 1 < kNumPrecalcXLog2X
+        bits_saved += instances - node_instances + 1 < x_log2_x_.size()
                           ? x_log2_x_[instances - node_instances + 1]
                           : xlogx(instances - node_instances + 1);
       } while (++symbol_ptr < start_symbol_ptr_ + node_ptr->last_match_index);
@@ -1384,7 +1384,7 @@ void Compressor::score_base_node_tree(
           start_symbol_ptr_ + node_ptr->last_match_index + num_extra_symbols;
       while (symbol_ptr <= local_end) {
         instances = symbol_counts_[*symbol_ptr];
-        if (instances < kNumPrecalcXLog2X) {
+        if (instances < x_log2_x_.size()) {
           string_profit -= x_log2_x_[instances];
           bits_saved += x_log2_x_[instances - node_instances + 1];
         } else {
@@ -1619,7 +1619,7 @@ void Compressor::score_base_node_tree_cap(
   double string_entropy = symbol_entropy[prior_symbol];
   const double first_symbol_entropy = string_entropy;
   double string_profit =
-      symbol_counts_[prior_symbol] < kNumPrecalcXLog2X
+      symbol_counts_[prior_symbol] < x_log2_x_.size()
           ? -x_log2_x_[symbol_counts_[prior_symbol]] - new_rule_cost_
           : xlogx(symbol_counts_[prior_symbol]) - new_rule_cost_;
   if ((node_ptr->instances == symbol_counts_[prior_symbol]) &&
@@ -1641,20 +1641,20 @@ void Compressor::score_base_node_tree_cap(
       }
       const uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       const double repeats = static_cast<double>(node_instances - 1);
-      double bits_saved = node_instances <= kNumPrecalcXLog2X
+      double bits_saved = node_instances <= x_log2_x_.size()
                               ? x_log2_x_[node_instances - 1] : xlogx(repeats);
       uint32_t* symbol_ptr =
           start_symbol_ptr_ + node_ptr->last_match_index - num_symbols + 1;
       do {
         instances = symbol_counts_[*symbol_ptr];
-        bits_saved += instances - node_instances + 1 < kNumPrecalcXLog2X
+        bits_saved += instances - node_instances + 1 < x_log2_x_.size()
                           ? x_log2_x_[instances - node_instances + 1]
                           : xlogx(instances - node_instances + 1);
       } while (++symbol_ptr < start_symbol_ptr_ + node_ptr->last_match_index);
 
       if (num_extra_symbols == 0) {
         instances = symbol_counts_[node_ptr->symbol];
-        if (instances < kNumPrecalcXLog2X) {
+        if (instances < x_log2_x_.size()) {
           string_profit -= x_log2_x_[instances];
           bits_saved += x_log2_x_[instances - node_instances + 1];
         } else {
@@ -1712,7 +1712,7 @@ void Compressor::score_base_node_tree_cap(
         uint32_t* local_end = start_symbol_ptr_ + node_ptr->last_match_index + num_extra_symbols;
         while (symbol_ptr < local_end) {
           instances = symbol_counts_[*symbol_ptr];
-          if (instances < kNumPrecalcXLog2X) {
+          if (instances < x_log2_x_.size()) {
             string_profit -= x_log2_x_[instances];
             bits_saved += x_log2_x_[instances - node_instances + 1];
           } else {
@@ -1769,7 +1769,7 @@ void Compressor::score_base_node_tree_cap(
           }
         }
         instances = symbol_counts_[*symbol_ptr];
-        if (instances < kNumPrecalcXLog2X) {
+        if (instances < x_log2_x_.size()) {
           string_profit -= x_log2_x_[instances];
           bits_saved += x_log2_x_[instances - node_instances + 1];
         } else {

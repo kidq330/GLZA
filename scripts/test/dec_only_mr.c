@@ -24,8 +24,8 @@ int main(int argc, char **argv) {
   fseek(f, 0, SEEK_END);
   size_t sz = (size_t)ftell(f);
   fseek(f, 0, SEEK_SET);
-  uint8_t *in = malloc(sz);
-  uint8_t *dec = malloc(20 * 1024 * 1024);
+  uint8_t *in = (uint8_t*)malloc(sz);
+  uint8_t *dec = (uint8_t*)malloc(20 * 1024 * 1024);
   if (!in || !dec) {
     fprintf(stderr, "malloc failed\n");
     return 1;

@@ -124,7 +124,12 @@ class Decoder {
 
   std::array<uint16_t, 0x100> sum_nbob_{};
   std::array<std::array<uint8_t, 0x1000>, 0x100> lookup_bits_{};
-  std::array<std::array<BinData, 26>, 0x100> bin_data_{};
+  // Indexed by code length, up to bin_data_[c][max_code_length_ + 1] (an
+  // overflow/sentinel bin). max_code_length_ = (inbuf[1] & 0x1F) + 1 can be as
+  // large as 32, so the inner dimension must cover index 33. The original C used
+  // a flat [0x100][26] array where the +1 overflow wrapped into the next row's
+  // unused [0] slot; std::array bounds-checks that, so size it for the real max.
+  std::array<std::array<BinData, 34>, 0x100> bin_data_{};
   std::array<QueueData, 0x100> queue_data_{};
 
   SymData* add_dictionary_symbol(uint8_t bits, uint8_t first_char);

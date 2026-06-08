@@ -72,10 +72,10 @@ int main(int argc, char **argv) {
   fseek(f, 0, SEEK_END);
   size_t n = (size_t)ftell(f);
   fseek(f, 0, SEEK_SET);
-  uint8_t *in = malloc(n);
+  uint8_t *in = (uint8_t*)malloc(n);
   size_t out_cap = n + 128 * 1024 * 1024;
-  uint8_t *out = malloc(out_cap);
-  uint8_t *dec = malloc(n);
+  uint8_t *out = (uint8_t*)malloc(out_cap);
+  uint8_t *dec = (uint8_t*)malloc(n);
   if (!in || !out || !dec) {
     fprintf(stderr, "malloc failed (input=%zu out_cap=%zu)\n", n, out_cap);
     return 1;
