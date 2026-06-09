@@ -65,9 +65,19 @@ add_test_harness(dec_only_mr dec_only_mr.c)
 
 option(GLZA_FUZZ "Build libFuzzer harness" OFF)
 if(GLZA_FUZZ)
-  add_executable(fuzz_roundtrip fuzz_roundtrip.cpp)
-  target_link_libraries(fuzz_roundtrip PRIVATE glza_lib)
-  target_compile_options(fuzz_roundtrip PRIVATE -fsanitize=fuzzer,address -fno-omit-frame-pointer -g)
+  # Compile the GLZA sources directly into the fuzz target (rather than linking
+  # the shared glza_lib) so the whole library is coverage-instrumented for
+  # libFuzzer. Linking glza_lib instead would leave the library invisible to
+  # the coverage feedback (black-box fuzzing), and instrumenting glza_lib in
+  # place would break the glza CLI / rt_* harnesses that link it without the
+  # sancov runtime.
+  add_executable(fuzz_roundtrip fuzz_roundtrip.cpp ${GLZA_SOURCES})
+  target_include_directories(fuzz_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(fuzz_roundtrip PRIVATE m)
+  target_compile_definitions(fuzz_roundtrip PRIVATE $<$<BOOL:${GLZA_PRINTON}>:PRINTON>)
+  target_compile_options(fuzz_roundtrip PRIVATE
+      -fsanitize=fuzzer,address -fno-omit-frame-pointer -g -O1
+      -D_FILE_OFFSET_BITS=64)
   target_link_options(fuzz_roundtrip PRIVATE -fsanitize=fuzzer,address)
 endif()
 

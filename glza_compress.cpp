@@ -3036,12 +3036,25 @@ void Compressor::process_ranked_candidates(
   child_ptr_array_.assign(next_new_symbol_number, nullptr);
   child_ptr_array_size_ = next_new_symbol_number;
 
+  // Estimate the match prefix-tree size before binding storage. Mirrors the
+  // original C (GLZAcompress.c): est_match_nodes drives both the arena/heap
+  // sizing decision and where the match-string buffer is placed relative to
+  // the match-node tree. Passing 0 here makes match_strings alias match_nodes
+  // and defeats the heap fallback, so this must reflect the real candidate set.
+  uint32_t est_match_nodes = 1;
+  uint32_t est_max_match_length = 0;
+  for (uint16_t cn = 0; cn < num_candidates; cn++) {
+    const uint32_t ns = candidates[cn].num_symbols;
+    if (ns > est_max_match_length) est_max_match_length = ns;
+    if (ns > 0) est_match_nodes += ns - 1;
+  }
+
   MatchNode* match_nodes;
   uint32_t match_nodes_limit;
   bind_match_storage(&match_nodes, &match_nodes_limit, &match_strings,
                      free_RAM_ptr, match_region_end_limit,
                      next_new_symbol_number, num_candidates,
-                     0, 0);
+                     est_max_match_length, est_match_nodes);
   num_match_nodes = 0;
   max_match_length = 0;
 
@@ -3063,6 +3076,13 @@ void Compressor::process_ranked_candidates(
         const uint32_t symbol = *best_score_match_ptr;
         if (match_node_ptr->child_ptr == nullptr) {
           if (num_match_nodes >= match_nodes_limit) {
+            note_match_limit(match_nodes_limit, num_match_nodes, num_candidates,
+                             cn, max_match_length,
+                             match_region_end_limit >
+                                     reinterpret_cast<uintptr_t>(match_nodes)
+                                 ? match_region_end_limit -
+                                       reinterpret_cast<uintptr_t>(match_nodes)
+                                 : 0);
             warn_match_nodes_limit();
             candidate_bad[cn] = 1;
             break;
@@ -3080,6 +3100,13 @@ void Compressor::process_ranked_candidates(
               ss >>= 4;
             } else {
               if (num_match_nodes >= match_nodes_limit) {
+                note_match_limit(match_nodes_limit, num_match_nodes,
+                                 num_candidates, cn, max_match_length,
+                                 match_region_end_limit >
+                                         reinterpret_cast<uintptr_t>(match_nodes)
+                                     ? match_region_end_limit -
+                                           reinterpret_cast<uintptr_t>(match_nodes)
+                                     : 0);
                 warn_match_nodes_limit();
                 candidate_bad[cn] = 1;
                 goto next_candidate_build;
@@ -3623,21 +3650,31 @@ bool Compressor::compress(size_t in_size, size_t* outsize_ptr,
   uint8_t* end_char_ptr = *iobuf + in_size;
 
   if (format < 2) {
+    // Tracks whether the scan bailed on an invalid/truncated UTF-8 sequence.
+    // A break on the *last* byte still leaves in_char_ptr == end_char_ptr, so
+    // the end-of-buffer test alone would wrongly declare compliance and the
+    // unconsumed final byte would be dropped; gate on this flag instead.
+    uint8_t utf8_invalid = 0;
     while (in_char_ptr < end_char_ptr) {
       const uint8_t this_char = *in_char_ptr++;
       if (this_char < 0x80) {
         *in_symbol_ptr++ = static_cast<uint32_t>(this_char);
       } else if ((this_char < 0xC0) || (this_char >= 0xF2) ||
+                 (in_char_ptr >= end_char_ptr) ||
                  ((*in_char_ptr & 0xC0) != 0x80)) {
+        // Lead byte with no (or invalid) continuation byte, including a
+        // multi-byte sequence truncated at the end of the buffer: not
+        // UTF-8 compliant, reprocess as raw bytes below.
+        utf8_invalid = 1;
         break;
       } else {
         uint32_t UTF8_value = (0x40 * static_cast<uint32_t>(this_char & 0x1F)) +
                               (*in_char_ptr++ & 0x3F);
         if (this_char >= 0xE0) {
-          if ((*in_char_ptr & 0xC0) != 0x80) break;
+          if ((in_char_ptr >= end_char_ptr) || (*in_char_ptr & 0xC0) != 0x80) { utf8_invalid = 1; break; }
           UTF8_value = (0x40 * UTF8_value) + static_cast<uint32_t>(*in_char_ptr++ & 0x3F);
           if (this_char >= 0xF0) {
-            if ((*in_char_ptr & 0xC0) != 0x80) break;
+            if ((in_char_ptr >= end_char_ptr) || (*in_char_ptr & 0xC0) != 0x80) { utf8_invalid = 1; break; }
             UTF8_value = (0x40 * (UTF8_value & 0x7FFF)) +
                          static_cast<uint32_t>(*in_char_ptr++ & 0x3F);
           }
@@ -3646,7 +3683,7 @@ bool Compressor::compress(size_t in_size, size_t* outsize_ptr,
         if (UTF8_value > max_UTF8_value) max_UTF8_value = UTF8_value;
       }
     }
-    if (in_char_ptr == end_char_ptr) UTF8_compliant = 1;
+    if (in_char_ptr == end_char_ptr && utf8_invalid == 0) UTF8_compliant = 1;
   }
 
   uint8_t max_terminal;

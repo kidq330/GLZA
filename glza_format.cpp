@@ -240,7 +240,7 @@ bool Formatter::format(size_t insize, uint8_t* inbuf, size_t* outsize_ptr,
         if ((in_char_ptr + 1 < end_char_ptr) &&
             ((*(in_char_ptr + 1) >= 'A') && (*(in_char_ptr + 1) <= 'Z') &&
              (cap_lock_disabled == 0)) &&
-            ((in_char_ptr + 1 == end_char_ptr) ||
+            ((in_char_ptr + 2 >= end_char_ptr) ||
              (*(in_char_ptr + 2) < 'a') || (*(in_char_ptr + 2) > 'z'))) {
           *out_char_ptr++ = 'B';
           *out_char_ptr++ = *in_char_ptr++ + 0x20;
@@ -284,6 +284,10 @@ bool Formatter::format(size_t insize, uint8_t* inbuf, size_t* outsize_ptr,
     for (uint32_t k = 1; k <= j; k++) {
       clear_counts(symbol_counts, order_1_counts);
       if ((k == 2) | (k == 4)) {
+        // The priming loop below reads inbuf2[i + k] for i in [0, k), so the
+        // buffer must hold at least 2*k bytes. Stride-k delta is meaningless on
+        // a shorter buffer anyway; skip it rather than read out of bounds.
+        if (static_cast<uint32_t>(insize) < 2 * k) continue;
         uint32_t i = 0;
         while (i < k) {
           symbol_counts[inbuf2[i]]++;
