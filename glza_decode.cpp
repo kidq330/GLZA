@@ -1194,17 +1194,18 @@ Decoder::SymData* Decoder::decode_new_cap_encoded(uint32_t* string_index_ptr) {
 
       if (base_symbol == 'C') {
         prior_is_cap_ = 1;
-        if (max_code_length_ >= 14)
-          temp_sym_data.bytes.type = 4;
+        // The encoder sets sd_[' '/'B'/'C'].type unconditionally (bit 2); the
+        // decoder must mirror that regardless of max_code_length_, otherwise the
+        // sym_type ctx2 (2*(type&7)) for the following symbol diverges and the
+        // stream desyncs on short inputs (max_code_length_ < 14).
+        temp_sym_data.bytes.type = 4;
       } else if (base_symbol == 'B') {
         prior_is_cap_ = 1;
         temp_sym_data.bytes.ends = 'C';
-        if (max_code_length_ >= 14)
-          temp_sym_data.bytes.type = 4;
+        temp_sym_data.bytes.type = 4;
       } else {
         if (base_symbol == ' ') {
-          if (max_code_length_ >= 14)
-            temp_sym_data.bytes.type = 4;
+          temp_sym_data.bytes.type = 4;
         } else if ((base_symbol >= 0x61) && (base_symbol <= 0x7A))
           temp_sym_data.bytes.type = 1;
       }

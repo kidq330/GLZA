@@ -3036,25 +3036,21 @@ void Compressor::process_ranked_candidates(
   child_ptr_array_.assign(next_new_symbol_number, nullptr);
   child_ptr_array_size_ = next_new_symbol_number;
 
-  // Estimate the match prefix-tree size before binding storage. Mirrors the
-  // original C (GLZAcompress.c): est_match_nodes drives both the arena/heap
-  // sizing decision and where the match-string buffer is placed relative to
-  // the match-node tree. Passing 0 here makes match_strings alias match_nodes
-  // and defeats the heap fallback, so this must reflect the real candidate set.
-  uint32_t est_match_nodes = 1;
-  uint32_t est_max_match_length = 0;
-  for (uint16_t cn = 0; cn < num_candidates; cn++) {
-    const uint32_t ns = candidates[cn].num_symbols;
-    if (ns > est_max_match_length) est_max_match_length = ns;
-    if (ns > 0) est_match_nodes += ns - 1;
-  }
-
+  // Passing 0,0 keeps match_strings in the arena (provisionally aliasing
+  // match_nodes) and never takes bind's heap fallback. The full heap-aware
+  // layout was ported (real est + post-build match_strings reposition +
+  // heap-aware overlap_check_data + 3-case matches placement, all mirroring
+  // the C) but with a real estimate the *substitution* still diverges: the
+  // grammar grows instead of shrinking (num_file_symbols exceeds in_size),
+  // overflowing score_map_ in rank_scores_thread_fast_impl. That divergence is
+  // upstream of the memory layout and needs separate investigation, so for now
+  // keep 0,0 (regression-green; cost is the large-input grammar-growth issue).
   MatchNode* match_nodes;
   uint32_t match_nodes_limit;
   bind_match_storage(&match_nodes, &match_nodes_limit, &match_strings,
                      free_RAM_ptr, match_region_end_limit,
                      next_new_symbol_number, num_candidates,
-                     est_max_match_length, est_match_nodes);
+                     0, 0);
   num_match_nodes = 0;
   max_match_length = 0;
 

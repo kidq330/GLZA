@@ -5,14 +5,14 @@
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages."${system}";
-      llvm = pkgs.llvmPackages_21;
+      llvm = pkgs.llvmPackages_22;
     in
     {
-      devShells."${system}".default = pkgs.mkShell {
-        buildInputs = [
-          llvm.clang
+      devShells."${system}".default = (pkgs.mkShell.override { stdenv = llvm.stdenv; }) {
+        packages = [
           llvm.clang-tools
           pkgs.gnumake
+          pkgs.cmake
           pkgs.bear
         ];
       };
