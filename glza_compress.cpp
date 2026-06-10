@@ -1359,12 +1359,16 @@ void Compressor::score_base_node_tree(
   while (true) {
     const uint32_t node_instances = node_ptr->instances;
     if (node_instances >= 2) {
+      // Bound node_data[level] pushes by the stack depth (see the _fast variant);
+      // deep/repetitive trees can otherwise overflow node_data.
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
-        node_data[level].string_entropy = string_entropy;
-        node_data[level].string_profit = string_profit;
-        node_data[level].node_ptr = node_ptr;
-        node_data[level].num_symbols = num_symbols;
-        node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        if (level < kNodeDataStackDepth - 1) {
+          node_data[level].string_entropy = string_entropy;
+          node_data[level].string_profit = string_profit;
+          node_data[level].node_ptr = node_ptr;
+          node_data[level].num_symbols = num_symbols;
+          node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        }
       }
       const uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       const double repeats = static_cast<double>(node_instances - 1);
@@ -1476,11 +1480,13 @@ void Compressor::score_base_node_tree(
         if ((node_ptr->sibling_node_num[1] > 0) &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) ||
              (tnp->sibling_node_num[1] > 0))) {
-          node_data[level].node_ptr = node_ptr;
-          node_data[level].num_symbols = num_symbols;
-          node_data[level].string_entropy = string_entropy;
-          node_data[level].string_profit = string_profit;
-          node_data[level++].next_sibling = 1;
+          if (level < kNodeDataStackDepth - 1) {
+            node_data[level].node_ptr = node_ptr;
+            node_data[level].num_symbols = num_symbols;
+            node_data[level].string_entropy = string_entropy;
+            node_data[level].string_profit = string_profit;
+            node_data[level++].next_sibling = 1;
+          }
         }
         node_ptr = &nodes_[sib];
       } else {
@@ -1496,7 +1502,7 @@ void Compressor::score_base_node_tree(
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0 && level < kNodeDataStackDepth - 1)
               node_data[level++].next_sibling = 1;
             node_ptr = &nodes_[node_ptr->sibling_node_num[0]];
           } else {
@@ -1556,10 +1562,17 @@ void Compressor::score_base_node_tree_fast(
           }
         }
       }
+      // Guard every node_data[level] push against the stack depth, matching the
+      // already-hardened sibling scorers (e.g. score_symbol_tree_fast): a
+      // pathologically deep/repetitive suffix tree can exceed kNodeDataStackDepth
+      // and overflow node_data (sized kNodeDataStackDepth). Skipping the push at
+      // the limit drops some deep candidates but keeps the grammar valid.
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
-        node_data[level].node_ptr = node_ptr;
-        node_data[level].num_symbols = num_symbols;
-        node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        if (level < kNodeDataStackDepth - 1) {
+          node_data[level].node_ptr = node_ptr;
+          node_data[level].num_symbols = num_symbols;
+          node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        }
       }
       num_symbols += num_extra_symbols + 1;
       node_ptr = &nodes_[node_ptr->child_node_num];
@@ -1572,10 +1585,12 @@ void Compressor::score_base_node_tree_fast(
         if ((node_ptr->sibling_node_num[1] > 0) &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) ||
              (tnp->sibling_node_num[1] > 0))) {
-          node_data[level].node_ptr = node_ptr;
-          node_data[level].num_symbols = num_symbols;
-          node_data[level].string_entropy_f = string_entropy;
-          node_data[level++].next_sibling = 1;
+          if (level < kNodeDataStackDepth - 1) {
+            node_data[level].node_ptr = node_ptr;
+            node_data[level].num_symbols = num_symbols;
+            node_data[level].string_entropy_f = string_entropy;
+            node_data[level++].next_sibling = 1;
+          }
         }
         node_ptr = &nodes_[sib];
       } else {
@@ -1590,7 +1605,7 @@ void Compressor::score_base_node_tree_fast(
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0 && level < kNodeDataStackDepth - 1)
               node_data[level++].next_sibling = 1;
             node_ptr = &nodes_[node_ptr->sibling_node_num[0]];
           } else {
@@ -1632,12 +1647,16 @@ void Compressor::score_base_node_tree_cap(
       double score;
       double short_score;
       int8_t send_score = -1;
+      // Bound node_data[level] pushes by the stack depth (see the _fast variant);
+      // deep/repetitive trees can otherwise overflow node_data.
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
-        node_data[level].string_entropy = string_entropy;
-        node_data[level].string_profit = string_profit;
-        node_data[level].node_ptr = node_ptr;
-        node_data[level].num_symbols = num_symbols;
-        node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        if (level < kNodeDataStackDepth - 1) {
+          node_data[level].string_entropy = string_entropy;
+          node_data[level].string_profit = string_profit;
+          node_data[level].node_ptr = node_ptr;
+          node_data[level].num_symbols = num_symbols;
+          node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        }
       }
       const uint32_t num_extra_symbols = node_ptr->num_extra_symbols;
       const double repeats = static_cast<double>(node_instances - 1);
@@ -1877,11 +1896,13 @@ void Compressor::score_base_node_tree_cap(
         if ((node_ptr->sibling_node_num[1] > 0) &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) ||
              (tnp->sibling_node_num[1] > 0))) {
-          node_data[level].node_ptr = node_ptr;
-          node_data[level].num_symbols = num_symbols;
-          node_data[level].string_entropy = string_entropy;
-          node_data[level].string_profit = string_profit;
-          node_data[level++].next_sibling = 1;
+          if (level < kNodeDataStackDepth - 1) {
+            node_data[level].node_ptr = node_ptr;
+            node_data[level].num_symbols = num_symbols;
+            node_data[level].string_entropy = string_entropy;
+            node_data[level].string_profit = string_profit;
+            node_data[level++].next_sibling = 1;
+          }
         }
         node_ptr = &nodes_[sib];
       } else {
@@ -1897,7 +1918,7 @@ void Compressor::score_base_node_tree_cap(
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0 && level < kNodeDataStackDepth - 1)
               node_data[level++].next_sibling = 1;
             node_ptr = &nodes_[node_ptr->sibling_node_num[0]];
           } else {
@@ -1993,10 +2014,17 @@ void Compressor::score_base_node_tree_cap_fast(
             num_symbols + num_extra_symbols - send_score;
         rank_scores_write_index_.store(++node_ptrs_num, std::memory_order_release);
       }
+      // Guard every node_data[level] push against the stack depth, matching the
+      // already-hardened sibling scorers (e.g. score_symbol_tree_fast): a
+      // pathologically deep/repetitive suffix tree can exceed kNodeDataStackDepth
+      // and overflow node_data (sized kNodeDataStackDepth). Skipping the push at
+      // the limit drops some deep candidates but keeps the grammar valid.
       if ((node_ptr->sibling_node_num[0] > 0) || (node_ptr->sibling_node_num[1] > 0)) {
-        node_data[level].node_ptr = node_ptr;
-        node_data[level].num_symbols = num_symbols;
-        node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        if (level < kNodeDataStackDepth - 1) {
+          node_data[level].node_ptr = node_ptr;
+          node_data[level].num_symbols = num_symbols;
+          node_data[level++].next_sibling = (node_ptr->sibling_node_num[0] <= 0);
+        }
       }
       num_symbols += num_extra_symbols + 1;
       node_ptr = &nodes_[node_ptr->child_node_num];
@@ -2009,10 +2037,12 @@ void Compressor::score_base_node_tree_cap_fast(
         if ((node_ptr->sibling_node_num[1] > 0) &&
             ((tnp->instances > 1) || (tnp->sibling_node_num[0] > 0) ||
              (tnp->sibling_node_num[1] > 0))) {
-          node_data[level].node_ptr = node_ptr;
-          node_data[level].num_symbols = num_symbols;
-          node_data[level].string_entropy_f = string_entropy;
-          node_data[level++].next_sibling = 1;
+          if (level < kNodeDataStackDepth - 1) {
+            node_data[level].node_ptr = node_ptr;
+            node_data[level].num_symbols = num_symbols;
+            node_data[level].string_entropy_f = string_entropy;
+            node_data[level++].next_sibling = 1;
+          }
         }
         node_ptr = &nodes_[sib];
       } else {
@@ -2027,7 +2057,7 @@ void Compressor::score_base_node_tree_cap_fast(
           num_symbols = node_data[level].num_symbols;
           node_ptr = node_data[level].node_ptr;
           if (node_data[level].next_sibling == 0) {
-            if (node_ptr->sibling_node_num[1] > 0)
+            if (node_ptr->sibling_node_num[1] > 0 && level < kNodeDataStackDepth - 1)
               node_data[level++].next_sibling = 1;
             node_ptr = &nodes_[node_ptr->sibling_node_num[0]];
           } else {

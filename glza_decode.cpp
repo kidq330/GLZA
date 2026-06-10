@@ -2134,6 +2134,8 @@ uint8_t* Decoder::decode(size_t in_size, uint8_t* inbuf, size_t* outsize_ptr,
         }
       } else if (sym_type == 1) {
         sym_data_ptr = decode_new(&new_string_index);
+        if (sym_data_ptr == nullptr || model_.read_decoder_failed() != 0)
+          goto decode_failed_early;
         std::memcpy(symbol_buffer_write_ptr_++, &sym_data_ptr->string_index, 8);
       } else {
         sym_data_ptr = update_queue(model_.decode_mtf_pos(queue_size_));
