@@ -3475,13 +3475,46 @@ void Compressor::process_ranked_candidates(
     }
   }
 
+  // Reuse-existing-rule: if a candidate's string is exactly an existing rule's
+  // definition, one of its occurrences is bracketed by a rule marker (0x80000001
+  // + rule_num) on the left and the next marker / EOF on the right. Minting a
+  // fresh duplicate rule for it would, once substituted, collapse the existing
+  // rule's own definition to a single symbol — a multi-use alias R -> [new] that
+  // the codec cannot represent (a SID of 0 always decodes as a base symbol).
+  // Instead, point such candidates at the existing rule (symbol number
+  // num_terminals_ + (marker - 0x80000001)) and substitute their *other*
+  // occurrences with it, leaving the existing rule's definition intact.
+  std::vector<uint32_t> reuse_rule(num_candidates, 0xFFFFFFFFu);
+  {
+    const uint8_t scan_max_i = stop_symbol_ptr < end_symbol_ptr_ ? 7 : 0;
+    for (size_t i = 0; i <= scan_max_i; i++) {
+      const size_t num_pairs = static_cast<size_t>(next_match_ptrs[i] - matches_start_ptr[i]) >> 1;
+      for (size_t j = 0; j < num_pairs; j++) {
+        const uint16_t cn = static_cast<uint16_t>(*(matches_start_ptr[i] + (2 * j)));
+        if (candidate_bad[cn] != 0 || reuse_rule[cn] != 0xFFFFFFFFu) continue;
+        const uint32_t start_index = *(matches_start_ptr[i] + (2 * j) + 1);
+        const uint32_t match_len = candidates[cn].num_symbols;
+        if (start_index >= first_define_index && start_index != 0 &&
+            start_symbol_ptr_[start_index - 1] >= 0x80000001u &&
+            start_symbol_ptr_[start_index - 1] != 0xFFFFFFFEu &&
+            start_symbol_ptr_[start_index + match_len] >= 0x80000000u)
+          reuse_rule[cn] = num_terminals_ +
+                           (start_symbol_ptr_[start_index - 1] - 0x80000001u);
+      }
+    }
+  }
+
   // Assign new rule numbers
   {
     uint32_t j = next_new_symbol_number;
     for (size_t i = 0; i < num_candidates; i++) {
       if (candidate_bad[i] == 0) {
-        if (j < symbol_counts_.size()) symbol_counts_[j] = 0;
-        new_rule_number[i] = j++;
+        if (reuse_rule[i] != 0xFFFFFFFFu) {
+          new_rule_number[i] = reuse_rule[i];
+        } else {
+          if (j < symbol_counts_.size()) symbol_counts_[j] = 0;
+          new_rule_number[i] = j++;
+        }
       }
     }
   }
@@ -3503,6 +3536,15 @@ void Compressor::process_ranked_candidates(
       if (candidate_bad[cn] == 0) {
         const uint32_t start_index = *(matches_start_ptr[i] + (2 * j) + 1);
         if (static_cast<int32_t>(start_index) > prior_match_end) {
+          // For a reused-rule candidate, skip the occurrence that is the reused
+          // rule's own definition (substituting it would make R -> [R]); its
+          // other occurrences are substituted with R below.
+          const uint32_t match_len = candidates[cn].num_symbols;
+          if (reuse_rule[cn] != 0xFFFFFFFFu && start_index >= first_define_index &&
+              start_index != 0 && start_symbol_ptr_[start_index - 1] >= 0x80000001u &&
+              start_symbol_ptr_[start_index - 1] != 0xFFFFFFFEu &&
+              start_symbol_ptr_[start_index + match_len] >= 0x80000000u)
+            continue;
           prior_match_end = static_cast<int32_t>(start_index + candidates[cn].num_symbols - 1);
           uint32_t* sp = start_symbol_ptr_ + start_index;
           while (in_symbol_ptr < sp) *out_symbol_ptr++ = *in_symbol_ptr++;
@@ -3520,6 +3562,8 @@ void Compressor::process_ranked_candidates(
   // Write new production rules and update symbol counts
   for (size_t i = 0; i < num_candidates; i++) {
     if (candidate_bad[i] == 0) {
+      if (reuse_rule[i] != 0xFFFFFFFFu)
+        continue;  // reused an existing rule; nothing new to define
       *out_symbol_ptr++ = num_rules + 0x80000001;
       uint32_t* ms_ptr = match_strings + (max_match_length * i);
       uint32_t* ms_end = ms_ptr + candidates[i].num_symbols;
