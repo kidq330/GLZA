@@ -1,2 +1,7 @@
 GLZA
 *.o
+enwik*
+build*
+.claude
+.direnv
+asan_logs
