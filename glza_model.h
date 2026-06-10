@@ -184,11 +184,13 @@ class DecoderModel : public ArithmeticModel {
   uint8_t* in_buffer_{};
   uint32_t code_{};
   uint8_t decoder_failed_{};
+  uint32_t in_size_dbg_{};
 
   void decoder_fail(const char* reason);
   void normalize_decoder(uint32_t bot);
 
  public:
+  void set_in_size_dbg(uint32_t n) { in_size_dbg_ = n; }
   void init_decoder(uint8_t max_base_code, uint8_t num_inst_codes,
                     uint8_t cap_encoded, uint8_t utf8_compliant,
                     uint8_t use_mtf, uint8_t* inbuf);
@@ -233,6 +235,7 @@ class DecoderModel : public ArithmeticModel {
   }
 
   void write_in_char_num(uint32_t value) { in_char_num_ = value; }
+  [[nodiscard]] uint32_t read_in_char_num() const { return in_char_num_; }
 };
 
 }  // namespace glza

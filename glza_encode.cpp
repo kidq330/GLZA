@@ -1037,6 +1037,76 @@ bool Encoder::encode(size_t insize, uint8_t* inbuf, size_t* outsize_ptr,
   }
   sd_[num_codes].symbol_start_index = symbol_ptr - symbol_array_.data() + 1;
 
+  // ===== Dead-rule elimination (see glza/EOF_DESYNC_ISSUE.md) =====
+  // A rule with count==0 has no live references, yet its definition still sits in
+  // symbol_array_ where the count scan above tallied every symbol it references.
+  // Those phantom references inflate other symbols' counts, so they never reach
+  // count==hits, are never removed by the transmission loop, and remain dictionary
+  // resident at EOF. When such a resident lands at (end_char_, max_code_length_) the
+  // nsob==0 end-of-stream sentinel becomes ambiguous and the decoder over-reads.
+  // Remove dead rules here -- BEFORE the count==1/2 reduction below, so that the
+  // reduction's replace_symbol() inlining can never re-reference a rule whose
+  // definition we dropped. First decrement the phantom references so each count equals
+  // the number of references that will actually be transmitted (iterate: zeroing a
+  // rule's count makes it dead in turn); then physically drop the dead definitions and
+  // recompute symbol_start_index / first_define_ptr from the rebuilt grammar.
+  {
+    std::vector<uint8_t> dead_processed(num_codes, 0);
+    uint32_t num_dead_rules = 0;
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (uint32_t d = num_base_symbols_; d < num_codes; d++) {
+        if ((dead_processed[d] != 0) || (sd_[d].count != 0))
+          continue;
+        dead_processed[d] = 1;
+        const uint32_t body_begin = sd_[d].symbol_start_index;
+        const uint32_t body_end = sd_[d + 1].symbol_start_index;  // body = [begin, end-1)
+        if (body_end <= body_begin + 1)
+          continue;
+        num_dead_rules++;
+        for (uint32_t p = body_begin; p + 1 < body_end; p++) {
+          const uint32_t v = symbol_array_[p];
+          if ((sd_[v].count != 0) && (--sd_[v].count == 0) && (v >= num_base_symbols_))
+            changed = true;
+        }
+      }
+    }
+    if (num_dead_rules != 0) {
+      uint32_t* read_ptr = symbol_array_.data();
+      uint32_t* write_ptr = symbol_array_.data();
+      while (read_ptr < end_symbol_ptr) {
+        const uint32_t s = *read_ptr++;
+        if (((s & 0x80000000) != 0)
+            && (sd_[s - 0x80000000 + num_base_symbols_].count == 0)) {
+          while (*read_ptr < 0x80000000)  // drop the dead rule's marker + body
+            read_ptr++;
+        } else {
+          *write_ptr++ = s;
+        }
+      }
+      end_symbol_ptr = write_ptr;
+      *end_symbol_ptr = kUniqueSymbol;
+      uint32_t prior_rule = num_base_symbols_ - 1;
+      first_define_ptr = end_symbol_ptr;
+      for (uint32_t* p = symbol_array_.data(); p < end_symbol_ptr; p++) {
+        if ((*p & 0x80000000) != 0) {
+          const uint32_t rule = *p - 0x80000000 + num_base_symbols_;
+          const uint32_t pos = static_cast<uint32_t>((p + 1) - symbol_array_.data());
+          if (first_define_ptr == end_symbol_ptr)
+            first_define_ptr = p;
+          while (++prior_rule < rule)  // fill every gap left by a dropped rule
+            sd_[prior_rule].symbol_start_index = pos;
+          sd_[rule].symbol_start_index = pos;
+          prior_rule = rule;
+        }
+      }
+      const uint32_t tail = static_cast<uint32_t>(end_symbol_ptr - symbol_array_.data()) + 1;
+      while (++prior_rule <= num_codes)
+        sd_[prior_rule].symbol_start_index = tail;
+    }
+  }
+
   if (cap_encoded_ != 0) {
     i = 0;
     do {

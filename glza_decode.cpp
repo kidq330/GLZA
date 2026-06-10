@@ -687,6 +687,14 @@ uint32_t Decoder::get_dictionary_index(uint16_t bin_num, uint8_t code_length, ui
   auto& bin_info = bin_data_[first_char][code_length];
   uint32_t num_symbols = bin_info.nsob;
   uint16_t num_bins = bin_info.nbob;
+#ifdef GLZA_OVERREAD_DIAG
+  if (bin_num < bin_info.fbob)
+    fprintf(stderr,
+        "GDIIDX underflow fc=%u cl=%u bin_num=%u fbob=%u nbob=%u nsob=%u "
+        "bin_code_len=%u prior_type=0x%x prior_end=0x%x prior_is_cap=%u\n",
+        first_char, code_length, bin_num, bin_info.fbob, num_bins, num_symbols,
+        bin_code_length_[first_char], prior_type_, prior_end_, prior_is_cap_);
+#endif
   uint32_t index = bin_num - bin_info.fbob;
   if (code_length > bin_code_length_[first_char]) {
     uint32_t min_extra_reduce_index;
@@ -1847,6 +1855,9 @@ uint8_t* Decoder::decode(size_t in_size, uint8_t* inbuf, size_t* outsize_ptr,
   std::jthread output_thread;
 
   model_.reset_codec_globals();
+#ifdef GLZA_OVERREAD_DIAG
+  model_.set_in_size_dbg(static_cast<uint32_t>(in_size));
+#endif
 
   fd_ = fd_out;
   stride_ = outbuf_index_ = out_buffers_sent_ = next_write_buffer = two_threads_ = 0;

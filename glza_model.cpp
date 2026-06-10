@@ -4,6 +4,11 @@
 
 namespace glza {
 
+#ifdef GLZA_OVERREAD_DIAG
+long glza_norm_ct = 0;
+uint32_t glza_ring_low[1024], glza_ring_range[1024], glza_ring_code[1024];
+#endif
+
 // ---------------------------------------------------------------------------
 // ArithmeticModel -- protected model-init helpers
 // ---------------------------------------------------------------------------
@@ -422,6 +427,16 @@ void EncoderModel::encoder_fail(const char* reason) {
 }
 
 void EncoderModel::normalize_encoder(uint32_t bot) {
+#ifdef GLZA_OVERREAD_DIAG
+  {
+    extern long glza_norm_ct;
+    static long target = -2;
+    if (target == -2) { const char* e = getenv("GLZA_TRACE_OP"); target = e ? atol(e) : -1; }
+    const long ct = glza_norm_ct++;
+    if (target >= 0 && ct >= target - 24 && ct <= target + 5)
+      fprintf(stderr, "  ENC op=%ld low=%08x range=%08x bot=%x\n", ct, low_, range_, bot);
+  }
+#endif
   uint32_t normalize_steps = 0;
   while ((low_ ^ (low_ + range_)) < kTop || (range_ < bot && ((range_ = -low_ & (bot - 1)), 1))) {
     if (encoder_failed_ != 0)
@@ -1272,7 +1287,25 @@ void DecoderModel::decoder_fail(const char* reason) {
 void DecoderModel::normalize_decoder(uint32_t bot) {
   if (decoder_failed_ != 0)
     return;
+#ifdef GLZA_OVERREAD_DIAG
+  extern long glza_norm_ct;
+  extern uint32_t glza_ring_low[], glza_ring_range[], glza_ring_code[];
+  const long ct = glza_norm_ct++;
+  glza_ring_low[ct & 0x3FF] = low_;
+  glza_ring_range[ct & 0x3FF] = range_;
+  glza_ring_code[ct & 0x3FF] = code_;
+#endif
   while ((low_ ^ (low_ + range_)) < kTop || (range_ < bot && ((range_ = -low_ & (bot - 1)), 1))) {
+#ifdef GLZA_OVERREAD_DIAG
+    if (in_size_dbg_ != 0 && in_char_num_ >= in_size_dbg_) {
+      fprintf(stderr, "OVERREAD op=%ld low=%08x range=%08x code=%08x bot=%x\n", ct, low_, range_, code_, bot);
+      for (long k = ct - 24; k <= ct; k++)
+        fprintf(stderr, "  DEC op=%ld low=%08x range=%08x code=%08x\n",
+                k, glza_ring_low[k & 0x3FF], glza_ring_range[k & 0x3FF], glza_ring_code[k & 0x3FF]);
+      decoder_failed_ = 1;
+      return;
+    }
+#endif
     code_ = (code_ << 8) | in_buffer_[in_char_num_++];
     low_ <<= 8;
     range_ <<= 8;
