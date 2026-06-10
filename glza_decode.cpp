@@ -1192,20 +1192,24 @@ Decoder::SymData* Decoder::decode_new_cap_encoded(uint32_t* string_index_ptr) {
       symbol_strings_[end_string_index++] = temp_sym_data.starts = temp_sym_data.bytes.ends = static_cast<uint8_t>(base_symbol);
       temp_sym_data.string_length = 1;
 
-      // The encoder seeds sd_[' '/'B'/'C'].type with bit 2 (space=4, B/C=0x24),
-      // but for short inputs (max_code_length_ < 14) it then clears bits 2-4,7
-      // via `type &= 0x63` (glza_encode.cpp). The decoder must mirror that
-      // masking on the same symbols, or the sym_type ctx2 for the following
-      // symbol diverges and the stream desyncs. For mcl >= 14 the encoder keeps
-      // bit 2 (and refines the cap-level bits), so keep type = 4 there.
+      // For short inputs (max_code_length_ < 14) the encoder clears bits 2-4,7
+      // of every coded symbol's type via `type &= 0x63` (glza_encode.cpp). The
+      // space is seeded at type 4 (bit 2), so masking makes it 0; the decoder
+      // must mirror that or the sym_type ctx2 for the following symbol diverges
+      // by 8 and the stream desyncs. B/C stay at 4 on both paths: the encoder's
+      // masked B/C is 0x24&0x63 = 0x20, which is *equivalent* to the decoder's 4
+      // under the shifted type layout (decoder cap-level is bits 4-5, encoder's
+      // bits 3-4) — both give first_char ctx 0 (decoder 4>>4, encoder
+      // (0x20&0x18)>>3) and (&3)==0. For mcl >= 14 the encoder keeps bit 2, so
+      // the space stays 4 too.
       const bool short_input = max_code_length_ < 14;
       if (base_symbol == 'C') {
         prior_is_cap_ = 1;
-        temp_sym_data.bytes.type = short_input ? 0x20 : 4;
+        temp_sym_data.bytes.type = 4;
       } else if (base_symbol == 'B') {
         prior_is_cap_ = 1;
         temp_sym_data.bytes.ends = 'C';
-        temp_sym_data.bytes.type = short_input ? 0x20 : 4;
+        temp_sym_data.bytes.type = 4;
       } else {
         if (base_symbol == ' ') {
           temp_sym_data.bytes.type = short_input ? 0 : 4;
