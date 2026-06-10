@@ -3036,21 +3036,22 @@ void Compressor::process_ranked_candidates(
   child_ptr_array_.assign(next_new_symbol_number, nullptr);
   child_ptr_array_size_ = next_new_symbol_number;
 
-  // Passing 0,0 keeps match_strings in the arena (provisionally aliasing
-  // match_nodes) and never takes bind's heap fallback. The full heap-aware
-  // layout was ported (real est + post-build match_strings reposition +
-  // heap-aware overlap_check_data + 3-case matches placement, all mirroring
-  // the C) but with a real estimate the *substitution* still diverges: the
-  // grammar grows instead of shrinking (num_file_symbols exceeds in_size),
-  // overflowing score_map_ in rank_scores_thread_fast_impl. That divergence is
-  // upstream of the memory layout and needs separate investigation, so for now
-  // keep 0,0 (regression-green; cost is the large-input grammar-growth issue).
+  // Estimate the match prefix-tree size so bind can choose arena vs heap and
+  // reserve string space. Mirrors GLZAcompress.c:4853-4868: a node per symbol
+  // beyond the first of each candidate, plus the longest candidate length.
+  uint32_t est_match_nodes = 1;
+  uint32_t est_max_len = 0;
+  for (uint16_t i = 0; i < num_candidates; i++) {
+    const uint32_t ns = candidates[i].num_symbols;
+    if (ns > est_max_len) est_max_len = ns;
+    if (ns > 0) est_match_nodes += ns - 1;
+  }
   MatchNode* match_nodes;
   uint32_t match_nodes_limit;
   bind_match_storage(&match_nodes, &match_nodes_limit, &match_strings,
                      free_RAM_ptr, match_region_end_limit,
                      next_new_symbol_number, num_candidates,
-                     0, 0);
+                     est_max_len, est_match_nodes);
   num_match_nodes = 0;
   max_match_length = 0;
 
@@ -3089,30 +3090,35 @@ void Compressor::process_ranked_candidates(
           match_node_ptr = &match_nodes[num_match_nodes++];
         } else {
           match_node_ptr = match_node_ptr->child_ptr;
-          uint32_t ss = symbol;
-          while (symbol != match_node_ptr->symbol) {
-            if (match_node_ptr->sibling_node_num[ss & 0xF] != 0) {
-              match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[ss & 0xF]];
-              ss >>= 4;
-            } else {
-              if (num_match_nodes >= match_nodes_limit) {
-                note_match_limit(match_nodes_limit, num_match_nodes,
-                                 num_candidates, cn, max_match_length,
-                                 match_region_end_limit >
-                                         reinterpret_cast<uintptr_t>(match_nodes)
-                                     ? match_region_end_limit -
-                                           reinterpret_cast<uintptr_t>(match_nodes)
-                                     : 0);
-                warn_match_nodes_limit();
-                candidate_bad[cn] = 1;
-                goto next_candidate_build;
-              }
-              match_node_ptr->sibling_node_num[ss & 0xF] = num_match_nodes;
-              init_match_node(&match_nodes[num_match_nodes], symbol, 0);
-              match_nodes[num_match_nodes].score_number = cn;
-              match_node_ptr = &match_nodes[num_match_nodes++];
+          uint8_t sibling_number;
+          if (move_to_match_sibling(match_nodes, &match_node_ptr, symbol,
+                                    &sibling_number) != 0) {
+            // Matched an existing node. If it is a leaf (end of a shorter
+            // candidate), this candidate is a superstring of it — mark bad and
+            // stop. Mirrors GLZAcompress.c:4910-4913. Omitting this check lets
+            // the walk descend off a leaf, turning it into an internal node and
+            // corrupting the overlap/substitution tree.
+            if (match_node_ptr->child_ptr == nullptr) {
+              candidate_bad[cn] = 1;
               break;
             }
+          } else {
+            if (num_match_nodes >= match_nodes_limit) {
+              note_match_limit(match_nodes_limit, num_match_nodes,
+                               num_candidates, cn, max_match_length,
+                               match_region_end_limit >
+                                       reinterpret_cast<uintptr_t>(match_nodes)
+                                   ? match_region_end_limit -
+                                         reinterpret_cast<uintptr_t>(match_nodes)
+                                   : 0);
+              warn_match_nodes_limit();
+              candidate_bad[cn] = 1;
+              goto next_candidate_build;
+            }
+            match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
+            init_match_node(&match_nodes[num_match_nodes], symbol, 0);
+            match_nodes[num_match_nodes].score_number = cn;
+            match_node_ptr = &match_nodes[num_match_nodes++];
           }
         }
         best_score_match_ptr++;
@@ -3121,6 +3127,147 @@ void Compressor::process_ranked_candidates(
     next_candidate_build:
       cn++;
     }
+  }
+
+  // For each candidate, search substrings for matches with other candidates;
+  // if found, invalidate the lower-scored one. Mirrors GLZAcompress.c:4939-5001.
+  // (The miss_ptr writes here are on the build-#1 tree, which the rebuild below
+  // discards; this pass's lasting effect is the candidate_bad marking.)
+  if (num_match_nodes != 0) {
+    uint16_t cn = 0;
+    while (cn < num_candidates) {
+      uint32_t* best_score_last_match_ptr =
+          start_symbol_ptr_ + candidates[cn].last_match_index;
+      uint32_t* best_score_match_ptr =
+          best_score_last_match_ptr - candidates[cn].num_symbols + 1;
+      uint32_t symbol = *best_score_match_ptr++;
+      MatchNode* match_node_ptr = &match_nodes[1];
+      move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
+      while (best_score_match_ptr <= best_score_last_match_ptr) {
+        uint32_t* search_match_ptr = best_score_match_ptr;
+        MatchNode* search_node_ptr = match_nodes;
+        while (true) {
+          if (search_node_ptr->child_ptr == nullptr) {
+            if (fast_mode_ == 0) {
+              if (search_node_ptr->score_number > cn)
+                candidate_bad[search_node_ptr->score_number] = 1;
+              else if (search_node_ptr->score_number != cn)
+                candidate_bad[cn] = 1;
+            } else {
+              const uint16_t a = cn;
+              const uint16_t b = static_cast<uint16_t>(search_node_ptr->score_number);
+              if (b > a) { if (candidate_bad[a] == 0) candidate_bad[b] = 1; }
+              else if (b < a) { if (candidate_bad[b] == 0) candidate_bad[a] = 1; }
+            }
+            break;
+          }
+          search_node_ptr = search_node_ptr->child_ptr;
+          symbol = *search_match_ptr;
+          if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
+            break;
+          match_node_ptr->miss_ptr = search_node_ptr;
+          search_match_ptr++;
+        }
+        symbol = *best_score_match_ptr++;
+      }
+      cn++;
+    }
+  }
+
+  // Redo the tree build with only the valid (non-bad) candidates, rooted at
+  // child_ptr_array_ (which the overlap search dispatches on) and producing the
+  // final num_match_nodes. Mirrors GLZAcompress.c:5003-5037.
+  num_match_nodes = 0;
+  for (uint32_t j = 0; j < next_new_symbol_number; j++)
+    child_ptr_array_[j] = nullptr;
+  {
+    uint16_t cn = 0;
+    while (cn < num_candidates) {
+      if (candidate_bad[cn] == 0) {
+        uint32_t* best_score_last_match_ptr =
+            start_symbol_ptr_ + candidates[cn].last_match_index;
+        uint32_t* best_score_match_ptr =
+            best_score_last_match_ptr - candidates[cn].num_symbols + 1;
+        MatchNode** child_ptr_ptr = &child_ptr_array_[*best_score_match_ptr++];
+        uint32_t symbol = *best_score_match_ptr++;
+        uint32_t best_score_num_symbols = 2;
+        MatchNode* match_node_ptr = move_to_base_match_child_with_make(
+            match_nodes, symbol, cn, &num_match_nodes, child_ptr_ptr);
+        while (best_score_match_ptr <= best_score_last_match_ptr) {
+          move_to_match_child_with_make(match_nodes, &match_node_ptr,
+                                        *best_score_match_ptr++, cn,
+                                        ++best_score_num_symbols,
+                                        &num_match_nodes);
+        }
+      }
+      cn++;
+    }
+  }
+
+  // Span nodes entering the longest (first) suffix match for each node: compute
+  // the Aho-Corasick miss_ptr/hit_ptr failure links the overlap search follows.
+  // Mirrors GLZAcompress.c:5039-5107.
+  {
+    uint16_t cn = 0;
+    while (cn < num_candidates) {
+      if (candidate_bad[cn] == 0) {
+        uint32_t* best_score_last_match_ptr =
+            start_symbol_ptr_ + candidates[cn].last_match_index;
+        uint32_t* best_score_suffix_ptr =
+            best_score_last_match_ptr - candidates[cn].num_symbols + 1;
+        uint32_t suffix_node_number = static_cast<uint32_t>(
+            child_ptr_array_[*best_score_suffix_ptr++] - match_nodes);
+        while (best_score_suffix_ptr <= best_score_last_match_ptr) {
+          uint32_t symbol = *best_score_suffix_ptr++;
+          uint32_t shifted_symbol = symbol;
+          while (symbol != match_nodes[suffix_node_number].symbol) {
+            suffix_node_number =
+                match_nodes[suffix_node_number].sibling_node_num[shifted_symbol & 0xF];
+            shifted_symbol >>= 4;
+          }
+          MatchNode* match_node_ptr = &match_nodes[suffix_node_number];
+          uint32_t* best_score_match_ptr = best_score_suffix_ptr;
+          if (symbol < child_ptr_array_size_ &&
+              child_ptr_array_[symbol] != nullptr) {
+            if ((match_node_ptr->child_ptr != nullptr) &&
+                (match_node_ptr->child_ptr->miss_ptr == nullptr)) {
+              write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr,
+                                      child_ptr_array_[symbol]);
+            }
+            MatchNode* search_node_ptr = child_ptr_array_[symbol];
+            while (best_score_match_ptr <= best_score_last_match_ptr) {
+              symbol = *best_score_match_ptr++;
+              match_node_ptr = match_node_ptr->child_ptr;
+              move_to_existing_match_sibling(match_nodes, &match_node_ptr, symbol);
+              if (move_to_search_sibling(match_nodes, symbol, &search_node_ptr) == 0)
+                break;
+              if (match_node_ptr->child_ptr == nullptr) {
+                if (match_node_ptr->hit_ptr == nullptr)
+                  match_node_ptr->hit_ptr = search_node_ptr;
+              } else if (match_node_ptr->child_ptr->miss_ptr == nullptr) {
+                write_siblings_miss_ptr(match_nodes, match_node_ptr->child_ptr,
+                                        search_node_ptr->child_ptr);
+              }
+              if (search_node_ptr->child_ptr == nullptr) break;
+              search_node_ptr = search_node_ptr->child_ptr;
+            }
+          }
+          suffix_node_number = static_cast<uint32_t>(
+              match_nodes[suffix_node_number].child_ptr - match_nodes);
+        }
+      }
+      cn++;
+    }
+  }
+
+  // Reposition match_strings just past the actually-built nodes so saving the
+  // strings does not clobber the match tree (arena mode only; in heap mode the
+  // strings already live in their own buffer). Mirrors GLZAcompress.c:5111-5114.
+  if (match_strings != match_strings_heap_.data()) {
+    match_strings = reinterpret_cast<uint32_t*>(
+        reinterpret_cast<uintptr_t>(match_nodes) +
+        static_cast<size_t>(num_match_nodes) * sizeof(MatchNode));
+    *p_match_strings = match_strings;
   }
 
   // Save match strings
@@ -3141,7 +3288,8 @@ void Compressor::process_ranked_candidates(
   // Overlap checking
   overlap_check_data = reinterpret_cast<OverlapCheck*>(
       (reinterpret_cast<uintptr_t>(&match_strings[num_candidates * max_match_length]) + 7) & ~static_cast<uintptr_t>(7));
-  if (reinterpret_cast<uintptr_t>(overlap_check_data) + (8 * sizeof(OverlapCheck)) > match_region_end_limit) {
+  if (reinterpret_cast<uintptr_t>(overlap_check_data) + (8 * sizeof(OverlapCheck)) > match_region_end_limit ||
+      match_strings == match_strings_heap_.data()) {
     if (overlap_check_heap_buf == nullptr) {
       overlap_check_heap_buf = static_cast<OverlapCheck*>(std::malloc(8 * sizeof(OverlapCheck)));
       if (overlap_check_heap_buf == nullptr)
@@ -3156,9 +3304,30 @@ void Compressor::process_ranked_candidates(
   uint32_t* matches_start_ptr[8];
   uint32_t* matches_stop_ptr[8];
   {
-    uint32_t* begin_matches = reinterpret_cast<uint32_t*>(
-        reinterpret_cast<uintptr_t>(overlap_check_data) + (8 * sizeof(OverlapCheck)));
-    uint32_t* matches_end_ptr = reinterpret_cast<uint32_t*>(end_RAM_ptr);
+    // Three placements for the per-thread overlap-match buffers, mirroring
+    // GLZAcompress.c:5158-5190. Each depends on where match_strings / overlap
+    // data ended up (heap vs arena) so the buffers land in valid memory.
+    const uintptr_t match_strings_end =
+        (reinterpret_cast<uintptr_t>(&match_strings[num_candidates * max_match_length]) + 7) &
+        ~static_cast<uintptr_t>(7);
+    uint32_t* begin_matches;
+    uint32_t* matches_end_ptr;
+    if (match_strings == match_strings_heap_.data()) {
+      // match_nodes/strings on the heap: reuse the arena slot match_nodes would
+      // have occupied (after child_ptr_array), bounded by match_region_end_limit.
+      begin_matches = reinterpret_cast<uint32_t*>(
+          (reinterpret_cast<uintptr_t>(free_RAM_ptr) +
+           static_cast<uintptr_t>(child_ptr_array_size_) * sizeof(MatchNode*) + 7) &
+          ~static_cast<uintptr_t>(7));
+      matches_end_ptr = reinterpret_cast<uint32_t*>(match_region_end_limit);
+    } else if (overlap_check_data == overlap_check_heap_buf) {
+      begin_matches = reinterpret_cast<uint32_t*>(match_strings_end);
+      matches_end_ptr = reinterpret_cast<uint32_t*>(match_region_end_limit);
+    } else {
+      begin_matches = reinterpret_cast<uint32_t*>(
+          reinterpret_cast<uintptr_t>(overlap_check_data) + (8 * sizeof(OverlapCheck)));
+      matches_end_ptr = reinterpret_cast<uint32_t*>(end_RAM_ptr);
+    }
     if (begin_matches >= matches_end_ptr) begin_matches = matches_end_ptr;
     const uint32_t matches_stride = static_cast<uint32_t>((matches_end_ptr - begin_matches) >> 3);
     for (size_t i = 0; i < 8; i++) {
@@ -3291,6 +3460,11 @@ void Compressor::process_ranked_candidates(
   in_symbol_ptr = start_symbol_ptr_;
   uint32_t* out_symbol_ptr = start_symbol_ptr_;
   int32_t prior_match_end = -1;
+  // Per-pass count of occurrences actually substituted by the overlap search.
+  // Build with -DGLZA_SUBST_DIAG to print it: it must stay > 0 and the grammar
+  // (num_file_symbols_) must shrink — if it sits at 0 while definitions are
+  // appended, the match tree is not searchable (see HEAP_FALLBACK_ISSUE.md).
+  [[maybe_unused]] uint32_t occurrences_replaced = 0;
   const uint8_t max_i = stop_symbol_ptr < end_symbol_ptr_ ? 7 : 0;
   for (size_t i = 0; i <= max_i; i++) {
     const size_t num_pairs = static_cast<size_t>(next_match_ptrs[i] - matches_start_ptr[i]) >> 1;
@@ -3303,6 +3477,7 @@ void Compressor::process_ranked_candidates(
           uint32_t* sp = start_symbol_ptr_ + start_index;
           while (in_symbol_ptr < sp) *out_symbol_ptr++ = *in_symbol_ptr++;
           *out_symbol_ptr++ = new_rule_number[cn];
+          occurrences_replaced++;
           if (new_rule_number[cn] < symbol_counts_.size())
             symbol_counts_[new_rule_number[cn]]++;
           in_symbol_ptr += candidates[cn].num_symbols;
@@ -3354,6 +3529,17 @@ void Compressor::process_ranked_candidates(
   end_symbol_ptr_ = out_symbol_ptr;
   *end_symbol_ptr_ = 0xFFFFFFFE;
   num_file_symbols_ = static_cast<uint32_t>(end_symbol_ptr_ - start_symbol_ptr_);
+
+#ifdef GLZA_SUBST_DIAG
+  fprintf(stderr,
+          "DIAG pass: candidates=%u occurrences_replaced=%u num_match_nodes=%u "
+          "num_file_symbols=%u (score_map cap %u)\n",
+          static_cast<unsigned>(num_candidates),
+          static_cast<unsigned>(occurrences_replaced),
+          static_cast<unsigned>(num_match_nodes),
+          static_cast<unsigned>(num_file_symbols_),
+          static_cast<unsigned>(score_map_.size() / 2));
+#endif
 
   // Score adaptation
   if (fast_mode_ == 0) {

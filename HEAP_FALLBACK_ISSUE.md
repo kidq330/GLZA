@@ -2,6 +2,60 @@
 
 Status as of 2026-06-10. Audience: whoever picks up the GLZA C++ port next.
 
+## RESOLVED 2026-06-10 — substitution now works (regression-green, ~2.0 bpB)
+
+The grammar-growth / `score_map_` crash is **fixed**. Root cause was **not**
+buffer placement or "heap mode" (the hypothesis below) — it was that the C++
+port **never built a *searchable* match tree**. The overlap search
+(`overlap_check_thread_impl`) dispatches on `child_ptr_array_[symbol]` and
+follows Aho-Corasick `miss_ptr`/`hit_ptr` failure links, but the port:
+- never populated `child_ptr_array_` (only `assign(..., nullptr)`),
+- never computed `miss_ptr`/`hit_ptr` (`write_siblings_miss_ptr` was dead code),
+- omitted the C's valid-candidate **rebuild** and **suffix-span** passes,
+- and its build #1 skipped the mid-walk "matched an existing leaf → bad" check
+  (`GLZAcompress.c:4910-4913`), so candidate strings descended *off* leaves and
+  corrupted the tree.
+
+So the search found **zero** matches every pass (proven: `occurrences_replaced`
+== 0 while `num_file_symbols` climbed past `in_size` → the `score_map_` memset
+overflow at `:1112`). Only rule *definitions* were appended; nothing was
+substituted; the grammar grew unboundedly. `bind(...,0,0)` and the buffer layout
+were downstream red herrings — it failed identically in arena mode with a real
+estimate.
+
+**The fix** (`process_ranked_candidates`, mirroring the C faithfully):
+1. build #1 mid-walk substring check via `move_to_match_sibling`
+   (`GLZAcompress.c:4905-4934`);
+2. overlap/miss-detection pass (`:4939-5001`);
+3. valid-candidate **rebuild** rooted at `child_ptr_array_`
+   (`:5003-5037`) — this is what populates the table the search reads;
+4. suffix **span** pass computing `miss_ptr`/`hit_ptr` (`:5039-5107`);
+5. re-enabled the real `est` (`1 + Σ(ns-1)`, `est_max_len`), the post-build
+   `match_strings` reposition (`:5111`), and the 3-case `begin_matches`
+   placement (`:5158-5190`).
+
+**Validated:** `regression_cmake.sh` green (was fully red mid-fix); enwik 200 KB
+and 1 MB round-trip at **2.01 bpB** (was crash / ~4.8 bpB degraded); the ASan
+matrix's 12 `score_map_:1112` compress crashes are gone. A throwaway diagnostic
+counts substitutions per pass — build `-DGLZA_SUBST_DIAG` and watch
+`occurrences_replaced` stay > 0 and `num_file_symbols` shrink.
+
+### Still open (separate from the heap fallback)
+- **Decoder cap-codec on `max_code_length < 14`.** Inputs whose dictionary code
+  length stays below 14 (enwik slices up to ~150 KB; mcl 11–13) now *reach* the
+  decoder (they used to crash in compress) and **mismatch on round-trip** — the
+  boundary is exactly mcl≥14 → OK. This is the documented cap-encoding decoder
+  bug, **not** the compressor. Real/large text (mcl≥14) is unaffected.
+- **Two compress ASan crashes remain on pathological synthetic-repetitive input
+  only** (`glza_compress.cpp:1523`, `:1363`) — score-tree buffer overflows on
+  degenerate inputs, unrelated to substitution.
+- Slow-mode (`-x`) suffix-tree crashes (`:2783`/`:668`) from the earlier sweep
+  still need their own look.
+
+---
+
+## Original investigation (below) — superseded; kept for history
+
 ## TL;DR
 
 The C++ port of GLZA's compressor (`glza/glza_compress.cpp`) does **not**
@@ -74,6 +128,29 @@ The C reference is `glza/GLZAcompress.c` (`process_ranked_candidates`, ~line
 substitution (`overlap_check_data`, the per-thread `next_match_ptrs` match
 buffers, traversal of the heap `match_nodes` tree), *not* in the buffer
 placement, which now matches the C.
+
+## Evidence: more rules can't route around it (raising max_rules in fast mode)
+
+To check whether the poor ratio is just the low `max_rules=5000` default, a
+`glza,r<N>` param (set `max_rules`, keep `fast_mode=1`) was tried on enwik1m:
+
+| max_rules | rules built | csize   | ratio   | C MB/s | result   |
+|----------:|------------:|--------:|--------:|-------:|----------|
+| 5000      | 5000        | 501264  | 47.804% | 2.45   | ok       |
+| 20000     | 20000       | 500897  | 47.769% | 1.13   | ok       |
+| 100000    | ~59320      | —       | —       | —      | SEGFAULT |
+| 1000000   | ~59320      | —       | —       | —      | SEGFAULT |
+
+So **4× the rules buys 0.035%** (and halves speed), and past ~20–60k rules it
+**crashes** — the same spiral as the enwik200m bug: more rules ⇒ bigger grammar
+stream ⇒ smaller match arena (`est=0,0` keeps `match_strings` there) ⇒
+`match_nodes_limit` hit ("match prefix-tree limit ... too small even after heap
+fallback") ⇒ candidates marked bad ⇒ no substitution ⇒ grammar grows ⇒ arena
+shrinks more ⇒ `score_map_` overflow / segfault. Conclusion: **the bottleneck is
+substitution quality, not the rule cap** — rules being created aren't replacing
+occurrences, so adding more does nothing. No parameter fixes this; only the
+heap-mode substitution work below does. (The `glza,r` param was a throwaway
+diagnostic and is not kept.)
 
 ## Current state of the code
 
