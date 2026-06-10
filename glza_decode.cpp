@@ -1192,20 +1192,23 @@ Decoder::SymData* Decoder::decode_new_cap_encoded(uint32_t* string_index_ptr) {
       symbol_strings_[end_string_index++] = temp_sym_data.starts = temp_sym_data.bytes.ends = static_cast<uint8_t>(base_symbol);
       temp_sym_data.string_length = 1;
 
+      // The encoder seeds sd_[' '/'B'/'C'].type with bit 2 (space=4, B/C=0x24),
+      // but for short inputs (max_code_length_ < 14) it then clears bits 2-4,7
+      // via `type &= 0x63` (glza_encode.cpp). The decoder must mirror that
+      // masking on the same symbols, or the sym_type ctx2 for the following
+      // symbol diverges and the stream desyncs. For mcl >= 14 the encoder keeps
+      // bit 2 (and refines the cap-level bits), so keep type = 4 there.
+      const bool short_input = max_code_length_ < 14;
       if (base_symbol == 'C') {
         prior_is_cap_ = 1;
-        // The encoder sets sd_[' '/'B'/'C'].type unconditionally (bit 2); the
-        // decoder must mirror that regardless of max_code_length_, otherwise the
-        // sym_type ctx2 (2*(type&7)) for the following symbol diverges and the
-        // stream desyncs on short inputs (max_code_length_ < 14).
-        temp_sym_data.bytes.type = 4;
+        temp_sym_data.bytes.type = short_input ? 0x20 : 4;
       } else if (base_symbol == 'B') {
         prior_is_cap_ = 1;
         temp_sym_data.bytes.ends = 'C';
-        temp_sym_data.bytes.type = 4;
+        temp_sym_data.bytes.type = short_input ? 0x20 : 4;
       } else {
         if (base_symbol == ' ') {
-          temp_sym_data.bytes.type = 4;
+          temp_sym_data.bytes.type = short_input ? 0 : 4;
         } else if ((base_symbol >= 0x61) && (base_symbol <= 0x7A))
           temp_sym_data.bytes.type = 1;
       }
