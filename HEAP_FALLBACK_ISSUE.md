@@ -40,17 +40,42 @@ matrix's 12 `score_map_:1112` compress crashes are gone. A throwaway diagnostic
 counts substitutions per pass — build `-DGLZA_SUBST_DIAG` and watch
 `occurrences_replaced` stay > 0 and `num_file_symbols` shrink.
 
-### Still open (separate from the heap fallback)
-- **Decoder cap-codec on `max_code_length < 14`.** Inputs whose dictionary code
-  length stays below 14 (enwik slices up to ~150 KB; mcl 11–13) now *reach* the
-  decoder (they used to crash in compress) and **mismatch on round-trip** — the
-  boundary is exactly mcl≥14 → OK. This is the documented cap-encoding decoder
-  bug, **not** the compressor. Real/large text (mcl≥14) is unaffected.
-- **Two compress ASan crashes remain on pathological synthetic-repetitive input
-  only** (`glza_compress.cpp:1523`, `:1363`) — score-tree buffer overflows on
-  degenerate inputs, unrelated to substitution.
-- Slow-mode (`-x`) suffix-tree crashes (`:2783`/`:668`) from the earlier sweep
-  still need their own look.
+### Follow-on fixes — all RESOLVED 2026-06-10
+
+The fixes below cleared everything the ASan matrix (`asan_overnight.sh`)
+surfaced. A full 44-case run now reports **44/44 OK** (was 7 OK / 27 ASAN /
+2 ASAN_DEC / 2 MISMATCH / 6 TIMEOUT at the start). The port round-trips the
+whole enwik size range 256 B – 1 MB, fast (`-m`/default) **and** slow (`-x`), at
+GLZA's target ratios; `regression_cmake.sh` green; round-trip fuzzer clean.
+
+1. **Cap-codec `max_code_length < 14` desync** — the encoder masks every coded
+   symbol's `type` with `& 0x63` for short inputs (`glza_encode.cpp`), zeroing
+   the space's bit 2, but the decoder set space/B/C `type=4` unconditionally.
+   Fixed in `glza_decode.cpp` (base-symbol path): for mcl<14, space `type=0`;
+   B/C stay 4 (the encoder's masked 0x20 is equivalent under the shifted decoder
+   layout). Commits "Fix cap-codec decoder desync on short inputs" + "cap-lock
+   B/C type for mcl<14 fix".
+2. **Base-tree scorer stack overflow** (`score_base_node_tree{,_fast,_cap,
+   _cap_fast}` `:1523`/`:1363`) — these four were missed in the hardening pass
+   that wraps every `node_data[level++]` push in `level < kNodeDataStackDepth-1`;
+   a deep/repetitive tree overflowed `node_data`. Added the guards. Plus a
+   decoder NULL-deref: the non-cap main loop deref'd `decode_new()`'s result
+   without the `nullptr → goto decode_failed_early` check the cap loop has.
+   Commit "Guard base-tree scorers against stack overflow; decode null-check".
+3. **Slow-mode `-x` suffix-tree crash** (`:2783`/`:668`) — was a casualty of the
+   heap-fallback substitution bug above; resolved by that fix. `-x` now round-
+   trips all sizes (1 MB at 1.95 bpB).
+4. **Degenerate alias rules** (the last small/repetitive mismatches) — the
+   substitution could mint a duplicate rule for a string that already *was* an
+   existing rule R's definition; substituting it collapsed R to `[new]`, a
+   multi-use 1-symbol alias the codec can't represent (SID 0 = base symbol), so
+   the stream desynced. Fixed in `process_ranked_candidates` by reusing the
+   existing rule (detected via the `0x80000001+rule_num` def marker bracketing an
+   occurrence) instead of minting a duplicate. Commit "Reuse existing rule
+   instead of minting duplicate aliases" (3cf6846).
+
+(The "cap-codec on mcl<14" item above turned out to be largely the *alias* bug,
+not a distinct decoder issue — fixing #4 fixed those round-trips too.)
 
 ---
 
